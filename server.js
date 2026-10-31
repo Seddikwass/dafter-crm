@@ -24,6 +24,25 @@ const DOC_TYPES = {
   avoir: { label: 'Avoir', prefix: 'AV' },
 };
 const METHODS = ['espèces', 'chèque', 'virement', 'traite', 'carte', 'D17'];
+const PURCHASE_TYPES = {
+  commande: { label: 'Commande fournisseur', prefix: 'CF' },
+  reception: { label: 'Bon de réception', prefix: 'BR' },
+  facture: { label: 'Facture d\'achat', prefix: 'FA' },
+};
+const PURCHASE_SELECT = `
+  SELECT pu.id, pu.supplier_id, s.name AS supplier_name, pu.type, pu.number, pu.supplier_ref, pu.issue_date, pu.due_date, pu.items, pu.total_ht, pu.total_tva, pu.timbre, pu.total_ttc, pu.notes, pu.status, pu.linked_id, pu.created_at,
+    l.number AS linked_number, l.type AS linked_type,
+    COALESCE(pp.paid, 0)::numeric AS paid,
+    CASE WHEN pu.type = 'facture' THEN (pu.total_ttc - COALESCE(pp.paid, 0)) ELSE 0 END::numeric AS balance,
+    CASE WHEN pu.type <> 'facture' THEN pu.status
+         WHEN COALESCE(pp.paid,0) >= pu.total_ttc - 0.0005 THEN 'payee'
+         WHEN pu.due_date < CURRENT_DATE THEN 'retard'
+         WHEN COALESCE(pp.paid,0) > 0 THEN 'partielle'
+         ELSE 'attente' END AS pay_status,
+    (CURRENT_DATE - pu.due_date) AS days_overdue
+  FROM purchases pu JOIN suppliers s ON s.id = pu.supplier_id
+  LEFT JOIN purchases l ON l.id = pu.linked_id
+  LEFT JOIN (SELECT purchase_id, SUM(amount) paid FROM purchase_payments GROUP BY purchase_id) pp ON pp.purchase_id = pu.id`;
 const TVA_RATES = [0, 7, 13, 19];
 
 // ---------- utilitaires ----------
@@ -113,7 +132,7 @@ async function loadUser(req) {
 route('POST', '/api/auth/register', { public: true }, async (req, res, b) => {
   throttle('reg:' + req.ip);
   const companyName = str(b.companyName, 120), name = str(b.name, 120), email = str(b.email, 160)?.toLowerCase();
-  if (!companyName) throw bad('Nom de l\'entreprise obligatoire');
+  if (!companyName && !(SUPERADMIN_EMAIL && email === SUPERADMIN_EMAIL)) throw bad('Nom de l\'entreprise obligatoire');
   if (!name) throw bad('Votre nom est obligatoire');
   if (!isEmail(email)) throw bad('E-mail invalide');
   if (!b.password || String(b.password).length < 8) throw bad('Le mot de passe doit contenir au moins 8 caractères');
@@ -155,7 +174,7 @@ route('GET', '/api/me', async (req) => {
   return {
     user: { id: u.id, name: u.name, email: u.email, role: u.role, is_superadmin: u.is_superadmin },
     company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer },
-    subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
+    subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, purchase_types: PURCHASE_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
     payment: { rib: process.env.PAYMENT_RIB || '', holder: process.env.PAYMENT_HOLDER || '', bank: process.env.PAYMENT_BANK || '', contact: process.env.PAYMENT_CONTACT || '' },
   };
@@ -184,7 +203,7 @@ route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, r
   const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [cid]);
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
-    for (const tbl of ['payments', 'documents', 'invoices', 'products', 'clients', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
+    for (const tbl of ['payments', 'purchase_payments', 'stock_moves', 'documents', 'purchases', 'invoices', 'warehouses', 'products', 'clients', 'suppliers', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
     await t.query('DELETE FROM companies WHERE id = $1', [cid]);
   });
   setSession(req, res, '', 0);
@@ -276,11 +295,31 @@ route('DELETE', '/api/clients/:id', async (req, res, b, p) => {
 });
 
 // ---------- factures ----------
+async function defaultWarehouse(t, cid) {
+  const r = await t.query('SELECT id FROM warehouses WHERE company_id = $1 ORDER BY id LIMIT 1', [cid]);
+  if (r.rows[0]) return r.rows[0].id;
+  return (await t.query(`INSERT INTO warehouses (company_id, name) VALUES ($1, 'Dépôt principal') RETURNING id`, [cid])).rows[0].id;
+}
+// Remplace les mouvements de stock liés à une pièce (facture, bon, réception…) par ceux de ses lignes.
+async function syncStock(t, cid, source, sourceId, items, sign, date, ref, userId, warehouseId) {
+  await t.query('DELETE FROM stock_moves WHERE company_id = $1 AND source = $2 AND source_id = $3', [cid, source, sourceId]);
+  if (!items || !items.length) return;
+  const ids = [...new Set(items.filter(i => i.product_id).map(i => Number(i.product_id)))];
+  if (!ids.length) return;
+  const tracked = (await t.query(`SELECT id FROM products WHERE company_id = $1 AND track_stock AND id IN (SELECT jsonb_array_elements_text($2::jsonb)::int)`, [cid, JSON.stringify(ids)])).rows.map(r => r.id);
+  if (!tracked.length) return;
+  const wh = warehouseId || await defaultWarehouse(t, cid);
+  for (const it of items) {
+    if (!tracked.includes(Number(it.product_id))) continue;
+    await t.query(`INSERT INTO stock_moves (company_id, product_id, warehouse_id, qty, kind, source, source_id, ref, moved_on, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [cid, it.product_id, wh, r3(it.qty * sign), sign > 0 ? 'entree' : 'sortie', source, sourceId, ref, date, userId]);
+  }
+}
 async function invoicesThisMonth(cid) {
   const { rows } = await db.query(`SELECT count(*)::int n FROM invoices WHERE company_id = $1 AND date_trunc('month', created_at) = date_trunc('month', now())`, [cid]);
   return rows[0].n;
 }
-async function insertInvoice(t, req, b, v) {
+async function insertInvoice(t, req, b, v, opts = {}) {
   const cid = req.user.company_id;
   if (!req.user.is_superadmin && subscription(req.user).state === 'free' && await invoicesThisMonth(cid) >= FREE.maxInvoicesPerMonth)
     throw new HttpError(402, `La formule gratuite est limitée à ${FREE.maxInvoicesPerMonth} factures par mois. Passez à Pro (40 DT par mois) pour facturer sans limite.`);
@@ -293,6 +332,7 @@ async function insertInvoice(t, req, b, v) {
   const { rows } = await t.query(`INSERT INTO invoices (company_id, client_id, number, issue_date, due_date, items, total_ht, total_tva, timbre, total_ttc, notes)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, number`,
     [cid, b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000)]);
+  if (!opts.skipStock) await syncStock(t, cid, 'invoice', rows[0].id, v.items, -1, b.issue_date, rows[0].number, req.user.id);
   return rows[0];
 }
 function computeInvoice(b) {
@@ -352,13 +392,20 @@ route('PUT', '/api/invoices/:id', async (req, res, b, p) => {
   if (!number) throw bad('Numéro de facture obligatoire');
   const dup = await db.query('SELECT 1 FROM invoices WHERE company_id = $1 AND number = $2 AND id <> $3', [cid, number, p.id]);
   if (dup.rows.length) throw bad(`Le numéro ${number} existe déjà`);
-  const r = await db.query(`UPDATE invoices SET client_id=$1, number=$2, issue_date=$3, due_date=$4, items=$5, total_ht=$6, total_tva=$7, timbre=$8, total_ttc=$9, notes=$10 WHERE id=$11 AND company_id=$12`,
-    [b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000), p.id, cid]);
-  if (!r.rowCount) throw new HttpError(404, 'Facture introuvable');
-  return { ok: true };
+  return db.tx(async t => {
+    const r = await t.query(`UPDATE invoices SET client_id=$1, number=$2, issue_date=$3, due_date=$4, items=$5, total_ht=$6, total_tva=$7, timbre=$8, total_ttc=$9, notes=$10 WHERE id=$11 AND company_id=$12`,
+      [b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000), p.id, cid]);
+    if (!r.rowCount) throw new HttpError(404, 'Facture introuvable');
+    const fromBL = await t.query(`SELECT 1 FROM documents WHERE company_id = $1 AND invoice_id = $2 AND type = 'livraison'`, [cid, p.id]);
+    if (!fromBL.rows.length) await syncStock(t, cid, 'invoice', Number(p.id), v.items, -1, b.issue_date, number, req.user.id);
+    return { ok: true };
+  });
 });
 route('DELETE', '/api/invoices/:id', async (req, res, b, p) => {
-  await db.query('DELETE FROM invoices WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  await db.tx(async t => {
+    await syncStock(t, req.user.company_id, 'invoice', Number(p.id), null);
+    await t.query('DELETE FROM invoices WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  });
   return { ok: true };
 });
 
@@ -367,22 +414,25 @@ function productFields(b) {
   const name = str(b.name, 200); if (!name) throw bad('Désignation obligatoire');
   const price = Number(b.unit_price); if (!(price >= 0)) throw bad('Prix invalide');
   const rate = Number(b.tva); if (!TVA_RATES.includes(rate)) throw bad('Taux de TVA invalide');
-  return [str(b.ref, 40), name, str(b.unit, 20), r3(price), rate, str(b.description, 1000)];
+  const alert = b.stock_alert === '' || b.stock_alert == null ? null : Number(b.stock_alert);
+  const buy = b.purchase_price === '' || b.purchase_price == null ? null : r3(b.purchase_price);
+  return [str(b.ref, 40), name, str(b.unit, 20), r3(price), rate, str(b.description, 1000), !!b.track_stock, Number.isFinite(alert) ? alert : null, buy];
 }
 route('GET', '/api/products', async (req) => {
-  const { rows } = await db.query('SELECT * FROM products WHERE company_id = $1 ORDER BY name', [req.user.company_id]);
+  const { rows } = await db.query(`SELECT p.*, COALESCE((SELECT SUM(qty) FROM stock_moves m WHERE m.product_id = p.id), 0)::numeric AS stock FROM products p WHERE p.company_id = $1 ORDER BY p.name`, [req.user.company_id]);
   return rows;
 });
 route('POST', '/api/products', async (req, res, b) => {
-  const { rows } = await db.query('INSERT INTO products (company_id, ref, name, unit, unit_price, tva, description) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id', [req.user.company_id, ...productFields(b)]);
+  const { rows } = await db.query('INSERT INTO products (company_id, ref, name, unit, unit_price, tva, description, track_stock, stock_alert, purchase_price) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id', [req.user.company_id, ...productFields(b)]);
   return rows[0];
 });
 route('PUT', '/api/products/:id', async (req, res, b, p) => {
-  const r = await db.query('UPDATE products SET ref=$1, name=$2, unit=$3, unit_price=$4, tva=$5, description=$6 WHERE id=$7 AND company_id=$8', [...productFields(b), p.id, req.user.company_id]);
+  const r = await db.query('UPDATE products SET ref=$1, name=$2, unit=$3, unit_price=$4, tva=$5, description=$6, track_stock=$7, stock_alert=$8, purchase_price=$9 WHERE id=$10 AND company_id=$11', [...productFields(b), p.id, req.user.company_id]);
   if (!r.rowCount) throw new HttpError(404, 'Article introuvable');
   return { ok: true };
 });
 route('DELETE', '/api/products/:id', async (req, res, b, p) => {
+  await db.query('DELETE FROM stock_moves WHERE product_id = $1 AND company_id = $2', [p.id, req.user.company_id]);
   await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
   return { ok: true };
 });
@@ -425,6 +475,7 @@ route('POST', '/api/documents', async (req, res, b) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, number`,
       [cid, b.client_id, type, number, b.issue_date, b.valid_until || null, v.items, v.ht, v.tva, v.ttc, str(b.notes, 2000), type === 'avoir' && inv ? 'impute' : 'emis', inv ? inv.id : null]);
     if (inv) await t.query(`INSERT INTO payments (company_id, invoice_id, amount, paid_on, method, reference, created_by) VALUES ($1,$2,$3,$4,'avoir',$5,$6)`, [cid, inv.id, v.ttc, b.issue_date, number, req.user.id]);
+    if (type === 'livraison') await syncStock(t, cid, 'document', rows[0].id, v.items, -1, b.issue_date, number, req.user.id);
     return rows[0];
   });
 });
@@ -434,8 +485,14 @@ route('PUT', '/api/documents/:id', async (req, res, b, p) => {
   if (!cur.rows[0]) throw new HttpError(404, 'Document introuvable');
   if (cur.rows[0].status === 'converti' || cur.rows[0].status === 'impute') throw bad('Ce document a déjà été transformé : il ne peut plus être modifié');
   const v = await docData(req, b);
-  await db.query(`UPDATE documents SET client_id=$1, issue_date=$2, valid_until=$3, items=$4, total_ht=$5, total_tva=$6, total_ttc=$7, notes=$8 WHERE id=$9 AND company_id=$10`,
-    [b.client_id, b.issue_date, b.valid_until || null, v.items, v.ht, v.tva, v.ttc, str(b.notes, 2000), p.id, cid]);
+  await db.tx(async t => {
+    await t.query(`UPDATE documents SET client_id=$1, issue_date=$2, valid_until=$3, items=$4, total_ht=$5, total_tva=$6, total_ttc=$7, notes=$8 WHERE id=$9 AND company_id=$10`,
+      [b.client_id, b.issue_date, b.valid_until || null, v.items, v.ht, v.tva, v.ttc, str(b.notes, 2000), p.id, cid]);
+    if (cur.rows[0].type === 'livraison') {
+      const n = (await t.query('SELECT number FROM documents WHERE id = $1', [p.id])).rows[0].number;
+      await syncStock(t, cid, 'document', Number(p.id), v.items, -1, b.issue_date, n, req.user.id);
+    }
+  });
   return { ok: true };
 });
 route('POST', '/api/documents/:id/status', async (req, res, b, p) => {
@@ -456,7 +513,7 @@ route('POST', '/api/documents/:id/convert', async (req, res, b, p) => {
     notes: [`Selon ${DOC_TYPES[d.type].label.toLowerCase()} ${d.number}`, d.notes].filter(Boolean).join('\n') };
   const v = computeInvoice(data);
   return db.tx(async t => {
-    const inv = await insertInvoice(t, req, data, v);
+    const inv = await insertInvoice(t, req, data, v, { skipStock: d.type === 'livraison' });
     await t.query(`UPDATE documents SET status = 'converti', invoice_id = $1 WHERE id = $2`, [inv.id, d.id]);
     return inv;
   });
@@ -466,8 +523,199 @@ route('DELETE', '/api/documents/:id', async (req, res, b, p) => {
   await db.tx(async t => {
     const { rows } = await t.query('SELECT type, number, invoice_id FROM documents WHERE id = $1 AND company_id = $2', [p.id, cid]);
     if (rows[0]?.type === 'avoir' && rows[0].invoice_id) await t.query(`DELETE FROM payments WHERE company_id = $1 AND invoice_id = $2 AND method = 'avoir' AND reference = $3`, [cid, rows[0].invoice_id, rows[0].number]);
+    await syncStock(t, cid, 'document', Number(p.id), null);
     await t.query('DELETE FROM documents WHERE id = $1 AND company_id = $2', [p.id, cid]);
   });
+  return { ok: true };
+});
+
+// ---------- stock ----------
+route('GET', '/api/warehouses', async (req) => {
+  await db.tx(t => defaultWarehouse(t, req.user.company_id));
+  const { rows } = await db.query('SELECT * FROM warehouses WHERE company_id = $1 ORDER BY id', [req.user.company_id]);
+  return rows;
+});
+route('POST', '/api/warehouses', async (req, res, b) => {
+  const name = str(b.name, 80); if (!name) throw bad('Nom du dépôt obligatoire');
+  return (await db.query('INSERT INTO warehouses (company_id, name) VALUES ($1,$2) RETURNING id', [req.user.company_id, name])).rows[0];
+});
+route('PUT', '/api/warehouses/:id', async (req, res, b, p) => {
+  const name = str(b.name, 80); if (!name) throw bad('Nom du dépôt obligatoire');
+  await db.query('UPDATE warehouses SET name = $1 WHERE id = $2 AND company_id = $3', [name, p.id, req.user.company_id]);
+  return { ok: true };
+});
+route('DELETE', '/api/warehouses/:id', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  const n = await db.query('SELECT (SELECT count(*) FROM warehouses WHERE company_id = $1)::int w, (SELECT COALESCE(SUM(abs(qty)),0) FROM stock_moves WHERE warehouse_id = $2)::numeric m', [cid, p.id]);
+  if (n.rows[0].w <= 1) throw bad('Gardez au moins un dépôt');
+  if (n.rows[0].m > 0) throw bad('Ce dépôt a des mouvements de stock : il ne peut pas être supprimé');
+  await db.query('DELETE FROM warehouses WHERE id = $1 AND company_id = $2', [p.id, cid]);
+  return { ok: true };
+});
+route('GET', '/api/stock', async (req) => {
+  const cid = req.user.company_id;
+  await db.tx(t => defaultWarehouse(t, cid));
+  const products = (await db.query(`SELECT p.id, p.ref, p.name, p.unit, p.stock_alert, p.purchase_price, p.unit_price, COALESCE(SUM(m.qty), 0)::numeric AS stock
+    FROM products p LEFT JOIN stock_moves m ON m.product_id = p.id WHERE p.company_id = $1 AND p.track_stock GROUP BY p.id ORDER BY p.name`, [cid])).rows;
+  const byWh = (await db.query(`SELECT product_id, warehouse_id, SUM(qty)::numeric qty FROM stock_moves WHERE company_id = $1 GROUP BY product_id, warehouse_id`, [cid])).rows;
+  const warehouses = (await db.query('SELECT * FROM warehouses WHERE company_id = $1 ORDER BY id', [cid])).rows;
+  return { products: products.map(p => ({ ...p, by_warehouse: byWh.filter(x => x.product_id === p.id) })), warehouses };
+});
+route('GET', '/api/stock/moves', async (req) => {
+  const { rows } = await db.query(`SELECT m.*, p.name AS product_name, p.unit, w.name AS warehouse_name, u.name AS user_name FROM stock_moves m JOIN products p ON p.id = m.product_id JOIN warehouses w ON w.id = m.warehouse_id LEFT JOIN users u ON u.id = m.created_by
+    WHERE m.company_id = $1 ORDER BY m.moved_on DESC, m.id DESC LIMIT 300`, [req.user.company_id]);
+  return rows;
+});
+route('POST', '/api/stock/moves', async (req, res, b) => {
+  const cid = req.user.company_id;
+  const kind = b.kind;
+  if (!['entree', 'sortie', 'inventaire', 'transfert'].includes(kind)) throw bad('Type de mouvement invalide');
+  const prod = (await db.query('SELECT id, track_stock FROM products WHERE id = $1 AND company_id = $2', [b.product_id, cid])).rows[0];
+  if (!prod) throw bad('Choisissez un article');
+  const wh = (await db.query('SELECT id FROM warehouses WHERE id = $1 AND company_id = $2', [b.warehouse_id, cid])).rows[0];
+  if (!wh) throw bad('Choisissez un dépôt');
+  const qty = Number(b.qty), date = isDate(b.moved_on) ? b.moved_on : today(), ref = str(b.ref, 120);
+  if (!Number.isFinite(qty) || (kind !== 'inventaire' && !(qty > 0)) || (kind === 'inventaire' && qty < 0)) throw bad('Quantité invalide');
+  await db.tx(async t => {
+    if (!prod.track_stock) await t.query('UPDATE products SET track_stock = true WHERE id = $1', [prod.id]);
+    const ins = (w, q, k, r) => t.query(`INSERT INTO stock_moves (company_id, product_id, warehouse_id, qty, kind, source, ref, moved_on, created_by) VALUES ($1,$2,$3,$4,$5,'manuel',$6,$7,$8)`, [cid, prod.id, w, r3(q), k, r, date, req.user.id]);
+    if (kind === 'entree') await ins(wh.id, qty, 'entree', ref);
+    else if (kind === 'sortie') await ins(wh.id, -qty, 'sortie', ref);
+    else if (kind === 'inventaire') {
+      const cur = Number((await t.query('SELECT COALESCE(SUM(qty),0)::numeric s FROM stock_moves WHERE product_id = $1 AND warehouse_id = $2', [prod.id, wh.id])).rows[0].s);
+      if (r3(qty - cur) !== 0) await ins(wh.id, qty - cur, 'inventaire', ref || `Inventaire : ${qty} comptés`);
+    } else {
+      const to = (await t.query('SELECT id FROM warehouses WHERE id = $1 AND company_id = $2', [b.to_warehouse_id, cid])).rows[0];
+      if (!to || to.id === wh.id) throw bad('Choisissez un dépôt de destination différent');
+      await ins(wh.id, -qty, 'transfert', ref || 'Transfert sortant');
+      await ins(to.id, qty, 'transfert', ref || 'Transfert entrant');
+    }
+  });
+  return { ok: true };
+});
+route('DELETE', '/api/stock/moves/:id', async (req, res, b, p) => {
+  const r = await db.query(`DELETE FROM stock_moves WHERE id = $1 AND company_id = $2 AND source = 'manuel'`, [p.id, req.user.company_id]);
+  if (!r.rowCount) throw bad('Seuls les mouvements saisis à la main peuvent être annulés ici');
+  return { ok: true };
+});
+
+// ---------- fournisseurs & achats ----------
+route('GET', '/api/suppliers', async (req) => {
+  const { rows } = await db.query(`SELECT s.*, COALESCE(x.balance,0)::numeric balance, COALESCE(x.overdue,0)::numeric overdue, COALESCE(x.n,0)::int purchase_count
+    FROM suppliers s LEFT JOIN (SELECT supplier_id, SUM(balance) balance, SUM(CASE WHEN pay_status='retard' THEN balance ELSE 0 END) overdue, count(*) n FROM (${PURCHASE_SELECT} WHERE pu.company_id = $1 AND pu.type = 'facture') q GROUP BY supplier_id) x ON x.supplier_id = s.id
+    WHERE s.company_id = $1 ORDER BY s.name`, [req.user.company_id]);
+  return rows;
+});
+route('GET', '/api/suppliers/:id', async (req, res, b, p) => {
+  const s = (await db.query('SELECT * FROM suppliers WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id])).rows[0];
+  if (!s) throw new HttpError(404, 'Fournisseur introuvable');
+  const purchases = (await db.query(`${PURCHASE_SELECT} WHERE pu.company_id = $1 AND pu.supplier_id = $2 ORDER BY pu.issue_date DESC, pu.id DESC`, [req.user.company_id, p.id])).rows;
+  return { supplier: s, purchases };
+});
+route('POST', '/api/suppliers', async (req, res, b) => {
+  const { rows } = await db.query(`INSERT INTO suppliers (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [req.user.company_id, ...clientFields(b)]);
+  return rows[0];
+});
+route('PUT', '/api/suppliers/:id', async (req, res, b, p) => {
+  const r = await db.query(`UPDATE suppliers SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8 WHERE id=$9 AND company_id=$10`, [...clientFields(b), p.id, req.user.company_id]);
+  if (!r.rowCount) throw new HttpError(404, 'Fournisseur introuvable');
+  return { ok: true };
+});
+route('DELETE', '/api/suppliers/:id', async (req, res, b, p) => {
+  const n = await db.query('SELECT count(*)::int n FROM purchases WHERE supplier_id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  if (n.rows[0].n) throw bad('Ce fournisseur a des achats : supprimez-les d\'abord.');
+  await db.query('DELETE FROM suppliers WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  return { ok: true };
+});
+
+async function purchaseData(req, b) {
+  const s = await db.query('SELECT id FROM suppliers WHERE id = $1 AND company_id = $2', [b.supplier_id, req.user.company_id]);
+  if (!s.rows[0]) throw bad('Choisissez un fournisseur');
+  if (!isDate(b.issue_date)) throw bad('Date invalide');
+  if (b.due_date && !isDate(b.due_date)) throw bad('Échéance invalide');
+  return computeInvoice({ ...b, timbre: b.type === 'facture' && b.timbre });
+}
+route('GET', '/api/purchases', async (req) => {
+  const { rows } = await db.query(`${PURCHASE_SELECT} WHERE pu.company_id = $1 ORDER BY pu.issue_date DESC, pu.id DESC`, [req.user.company_id]);
+  return rows;
+});
+route('GET', '/api/purchases/:id', async (req, res, b, p) => {
+  const r = (await db.query(`${PURCHASE_SELECT} WHERE pu.company_id = $1 AND pu.id = $2`, [req.user.company_id, p.id])).rows[0];
+  if (!r) throw new HttpError(404, 'Achat introuvable');
+  const supplier = (await db.query('SELECT * FROM suppliers WHERE id = $1', [r.supplier_id])).rows[0];
+  const pays = (await db.query('SELECT * FROM purchase_payments WHERE purchase_id = $1 ORDER BY paid_on, id', [p.id])).rows;
+  return { ...r, supplier, payments: pays };
+});
+async function insertPurchase(t, req, b, v, opts = {}) {
+  const cid = req.user.company_id, type = b.type;
+  const year = Number(b.issue_date.slice(0, 4)), key = `achat-${type}-${year}`;
+  const seq = await t.query(`UPDATE companies SET doc_seq = jsonb_set(doc_seq, ARRAY[$2::text], to_jsonb(COALESCE((doc_seq->>$2)::int, 0) + 1)) WHERE id = $1 RETURNING (doc_seq->>$2)::int n`, [cid, key]);
+  const number = `${PURCHASE_TYPES[type].prefix}${year}-${String(seq.rows[0].n).padStart(4, '0')}`;
+  const { rows } = await t.query(`INSERT INTO purchases (company_id, supplier_id, type, number, supplier_ref, issue_date, due_date, items, total_ht, total_tva, timbre, total_ttc, notes, status)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'emis') RETURNING id, number`,
+    [cid, b.supplier_id, type, number, str(b.supplier_ref, 60), b.issue_date, type === 'facture' ? (b.due_date || b.issue_date) : (b.due_date || null), v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000)]);
+  if ((type === 'reception' || type === 'facture') && !opts.skipStock) await syncStock(t, cid, 'achat', rows[0].id, v.items, 1, b.issue_date, number, req.user.id);
+  return rows[0];
+}
+route('POST', '/api/purchases', async (req, res, b) => {
+  if (!PURCHASE_TYPES[b.type]) throw bad('Type d\'achat inconnu');
+  const v = await purchaseData(req, b);
+  return db.tx(t => insertPurchase(t, req, b, v));
+});
+route('PUT', '/api/purchases/:id', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  const cur = (await db.query('SELECT * FROM purchases WHERE id = $1 AND company_id = $2', [p.id, cid])).rows[0];
+  if (!cur) throw new HttpError(404, 'Achat introuvable');
+  if (cur.status === 'converti') throw bad('Ce document a déjà été transformé : il ne peut plus être modifié');
+  const v = await purchaseData(req, { ...b, type: cur.type });
+  const paid = (await db.query('SELECT COALESCE(SUM(amount),0)::numeric s FROM purchase_payments WHERE purchase_id = $1', [p.id])).rows[0].s;
+  if (paid > v.ttc + 0.0005) throw bad('Le total ne peut pas être inférieur aux paiements déjà faits');
+  await db.tx(async t => {
+    await t.query(`UPDATE purchases SET supplier_id=$1, supplier_ref=$2, issue_date=$3, due_date=$4, items=$5, total_ht=$6, total_tva=$7, timbre=$8, total_ttc=$9, notes=$10 WHERE id=$11`,
+      [b.supplier_id, str(b.supplier_ref, 60), b.issue_date, cur.type === 'facture' ? (b.due_date || b.issue_date) : (b.due_date || null), v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000), p.id]);
+    const fromReception = (await t.query(`SELECT 1 FROM purchases WHERE company_id = $1 AND linked_id = $2 AND type = 'reception'`, [cid, p.id])).rows.length;
+    if ((cur.type === 'reception' || cur.type === 'facture') && !fromReception) await syncStock(t, cid, 'achat', Number(p.id), v.items, 1, b.issue_date, cur.number, req.user.id);
+  });
+  return { ok: true };
+});
+route('POST', '/api/purchases/:id/convert', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  const d = (await db.query('SELECT * FROM purchases WHERE id = $1 AND company_id = $2', [p.id, cid])).rows[0];
+  if (!d) throw new HttpError(404, 'Achat introuvable');
+  if (d.type === 'facture') throw bad('C\'est déjà une facture d\'achat');
+  if (d.status === 'converti') throw bad('Ce document a déjà été transformé');
+  const target = b.to === 'reception' && d.type === 'commande' ? 'reception' : 'facture';
+  const data = { type: target, supplier_id: d.supplier_id, issue_date: today(), due_date: target === 'facture' ? addDays(today(), 30) : null, items: d.items, timbre: target === 'facture', supplier_ref: b.supplier_ref,
+    notes: [`Selon ${PURCHASE_TYPES[d.type].label.toLowerCase()} ${d.number}`, d.notes].filter(Boolean).join('\n') };
+  const v = computeInvoice(data);
+  return db.tx(async t => {
+    const r = await insertPurchase(t, req, data, v, { skipStock: d.type === 'reception' });
+    await t.query(`UPDATE purchases SET status = 'converti', linked_id = $1 WHERE id = $2`, [r.id, d.id]);
+    return r;
+  });
+});
+route('DELETE', '/api/purchases/:id', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  await db.tx(async t => {
+    await syncStock(t, cid, 'achat', Number(p.id), null);
+    await t.query(`UPDATE purchases SET status = 'emis', linked_id = NULL WHERE company_id = $1 AND linked_id = $2`, [cid, p.id]);
+    await t.query('DELETE FROM purchases WHERE id = $1 AND company_id = $2', [p.id, cid]);
+  });
+  return { ok: true };
+});
+route('POST', '/api/purchases/:id/payments', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  const pu = (await db.query(`${PURCHASE_SELECT} WHERE pu.company_id = $1 AND pu.id = $2`, [cid, p.id])).rows[0];
+  if (!pu || pu.type !== 'facture') throw bad('Facture d\'achat introuvable');
+  const amount = r3(b.amount);
+  if (!(amount > 0)) throw bad('Montant invalide');
+  if (amount > r3(pu.balance) + 0.0005) throw bad(`Le montant dépasse le reste à payer (${r3(pu.balance).toFixed(3)} DT)`);
+  if (!isDate(b.paid_on)) throw bad('Date invalide');
+  if (!METHODS.includes(b.method)) throw bad('Mode de paiement invalide');
+  return (await db.query(`INSERT INTO purchase_payments (company_id, purchase_id, amount, paid_on, method, reference, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [cid, p.id, amount, b.paid_on, b.method, str(b.reference, 120), req.user.id])).rows[0];
+});
+route('DELETE', '/api/purchase-payments/:id', async (req, res, b, p) => {
+  await db.query('DELETE FROM purchase_payments WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
   return { ok: true };
 });
 
@@ -500,9 +748,12 @@ route('DELETE', '/api/payments/:id', async (req, res, b, p) => {
 route('GET', '/api/alerts', async (req) => {
   const { rows } = await db.query(`SELECT * FROM (${INVOICE_SELECT} WHERE i.company_id = $1) x
     WHERE status <> 'payee' AND due_date <= CURRENT_DATE + 7 ORDER BY due_date`, [req.user.company_id]);
+  const sup = (await db.query(`SELECT * FROM (${PURCHASE_SELECT} WHERE pu.company_id = $1 AND pu.type = 'facture') x WHERE pay_status <> 'payee' AND due_date <= CURRENT_DATE + 7 ORDER BY due_date`, [req.user.company_id])).rows;
+  const low = (await db.query(`SELECT * FROM (SELECT p.id, p.name, p.unit, p.stock_alert, COALESCE(SUM(m.qty),0)::numeric stock FROM products p LEFT JOIN stock_moves m ON m.product_id = p.id WHERE p.company_id = $1 AND p.track_stock GROUP BY p.id) z WHERE stock <= COALESCE(stock_alert, 0) ORDER BY stock`, [req.user.company_id])).rows;
   return {
     overdue: rows.filter(r => r.status === 'retard'),
     upcoming: rows.filter(r => r.status !== 'retard'),
+    supplier_due: sup, low_stock: low,
   };
 });
 
@@ -536,7 +787,9 @@ route('GET', '/api/dashboard', async (req) => {
   const top = await db.query(`SELECT client_id, client_name, SUM(balance)::numeric balance, SUM(balance) FILTER (WHERE status='retard')::numeric overdue
     FROM (${INVOICE_SELECT} WHERE i.company_id = $1) x WHERE status <> 'payee' GROUP BY client_id, client_name ORDER BY SUM(balance) DESC LIMIT 5`, [cid]);
   const counts = await db.query(`SELECT (SELECT count(*) FROM clients WHERE company_id=$1)::int clients, (SELECT count(*) FROM invoices WHERE company_id=$1)::int invoices`, [cid]);
-  return { ...k.rows[0], ...pm.rows[0], ...counts.rows[0], months: months.rows, aging: aging.rows[0], top_debtors: top.rows };
+  const sp = (await db.query(`SELECT COALESCE(SUM(balance),0)::numeric supplier_due, COALESCE(SUM(balance) FILTER (WHERE pay_status='retard'),0)::numeric supplier_overdue FROM (${PURCHASE_SELECT} WHERE pu.company_id = $1 AND pu.type = 'facture') x`, [cid])).rows[0];
+  const ls = (await db.query(`SELECT count(*)::int low_stock FROM (SELECT p.id, p.stock_alert, COALESCE(SUM(m.qty),0) stock FROM products p LEFT JOIN stock_moves m ON m.product_id = p.id WHERE p.company_id = $1 AND p.track_stock GROUP BY p.id) z WHERE stock <= COALESCE(stock_alert, 0)`, [cid])).rows[0];
+  return { ...k.rows[0], ...pm.rows[0], ...counts.rows[0], ...sp, ...ls, months: months.rows, aging: aging.rows[0], top_debtors: top.rows };
 });
 
 // ---------- super-admin (gestion des abonnements) ----------
@@ -634,10 +887,7 @@ route('DELETE', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true
   if (!rows[0]) throw new HttpError(404, 'Entreprise introuvable');
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
-    await t.query('DELETE FROM payments WHERE company_id = $1', [p.id]);
-    await t.query('DELETE FROM documents WHERE company_id = $1', [p.id]);
-    await t.query('DELETE FROM invoices WHERE company_id = $1', [p.id]);
-    await t.query('DELETE FROM products WHERE company_id = $1', [p.id]);
+    for (const tbl of ['payments', 'purchase_payments', 'stock_moves', 'documents', 'purchases', 'invoices', 'warehouses', 'products', 'suppliers']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [p.id]);
     await t.query('DELETE FROM clients WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM users WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM companies WHERE id = $1', [p.id]);

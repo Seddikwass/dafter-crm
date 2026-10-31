@@ -122,6 +122,7 @@ const I = {
   bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   shield: '<path d="M12 2.5l8 3v6c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10v-6z"/>',
+  box: '<path d="M3.5 7.5L12 3l8.5 4.5v9L12 21l-8.5-4.5z"/><path d="M3.5 7.5L12 12l8.5-4.5M12 12v9"/>',
 };
 const icon = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${I[k]}</svg>`;
 
@@ -130,8 +131,8 @@ function shell(active, content) {
   const me = S.me; const sub = me.subscription;
   const plat = me.company.is_platform;
   const links = plat ? [['#/admin', 'shield', 'Abonnés'], ['#/admin/acces', 'users', 'Accès'], ['#/parametres', 'gear', 'Compte']] : [
-    ['#/', 'home', 'Accueil'], ['#/clients', 'users', 'Clients'], ['#/factures', 'doc', 'Factures'],
-    ['#/paiements', 'cash', 'Paiements'], ['#/alertes', 'bell', 'Échéances'], ['#/parametres', 'gear', 'Compte'],
+    ['#/', 'home', 'Accueil'], ['#/clients', 'users', 'Clients'], ['#/factures', 'doc', 'Ventes'],
+    ['#/achats', 'box', 'Achats'], ['#/alertes', 'bell', 'Échéances'], ['#/parametres', 'gear', 'Compte'],
   ];
   if (me.user.is_superadmin && !plat) links.push(['#/admin', 'shield', 'Abonnés']);
   let banner = '';
@@ -228,6 +229,7 @@ async function pageDashboard() {
       <div><div class="k">À échoir sous 7 jours</div><div class="v">${amt(d.due_soon, false)}</div><div class="n">${d.due_soon_count} facture${d.due_soon_count > 1 ? 's' : ''}</div></div>
       <div><div class="k">En retard</div><div class="v ${d.overdue > 0 ? 'pome' : ''}">${amt(d.overdue, false)}</div><div class="n">${d.overdue_count} facture${d.overdue_count > 1 ? 's' : ''}</div></div>
     </div>
+    ${d.supplier_due > 0 || d.low_stock > 0 ? `<div class="row-actions" style="margin-top:12px">${d.supplier_due > 0 ? `<a class="btn small" href="#/achats/facture">À payer aux fournisseurs : ${amt(d.supplier_due)}${d.supplier_overdue > 0 ? ' dont ' + plain(d.supplier_overdue) + ' en retard' : ''}</a>` : ''}${d.low_stock > 0 ? `<a class="btn small danger" href="#/stock">${d.low_stock} article${d.low_stock > 1 ? 's' : ''} en stock bas</a>` : ''}</div>` : ''}
     <div class="dash-cols">
       <div>
         <h2>Échéances à traiter</h2>
@@ -299,7 +301,7 @@ function lineEditor(f, products, timbreOn = () => false) {
   return { readLines, recalc };
 }
 function salesTabs(active) {
-  const t = [['#/factures', 'Factures'], ['#/docs/devis', 'Devis'], ['#/docs/commande', 'Commandes'], ['#/docs/livraison', 'Livraisons'], ['#/docs/avoir', 'Avoirs'], ['#/articles', 'Articles']];
+  const t = [['#/factures', 'Factures'], ['#/docs/devis', 'Devis'], ['#/docs/commande', 'Commandes'], ['#/docs/livraison', 'Livraisons'], ['#/docs/avoir', 'Avoirs'], ['#/paiements', 'Encaissements'], ['#/articles', 'Articles']];
   return `<nav class="tabs seg" aria-label="Ventes">${t.map(([h, l]) => `<a href="${h}" class="${h === active ? 'on' : ''}" ${h === active ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>`;
 }
 
@@ -516,10 +518,10 @@ function paymentModal(inv, done) {
   });
 }
 
-function printInvoice(inv, kind) {
-  const co = S.me.company, c = inv.client;
-  const K = kind ? S.me.doc_types[kind] : { label: 'Facture' };
-  const qtyOnly = kind === 'livraison';
+function printInvoice(inv, kind, opts = {}) {
+  const co = S.me.company, c = opts.party || inv.client;
+  const K = opts.label ? { label: opts.label } : kind ? S.me.doc_types[kind] : { label: 'Facture' };
+  const qtyOnly = opts.qtyOnly ?? kind === 'livraison';
   const byRate = {}; inv.items.forEach(l => { if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + Math.round(l.total_ht * l.tva / 100 * 1000) / 1000; });
   document.getElementById('print').innerHTML = `
     <div class="inv-head">
@@ -529,7 +531,7 @@ function printInvoice(inv, kind) {
     <div class="inv-box" style="margin-left:auto;width:50%"><b>${esc(c.name)}</b><br>${c.matricule_fiscal ? `MF : ${esc(c.matricule_fiscal)}<br>` : ''}${[c.address, c.city].some(Boolean) ? esc([c.address, c.city].filter(Boolean).join(', ')) + '<br>' : ''}${esc(c.phone || '')}</div>
     ${qtyOnly ? `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Quantité</th></tr></thead>
     <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td></tr>`).join('')}</tbody></table>
-    <div style="display:flex;justify-content:space-between;margin-top:50px"><span>Signature du livreur</span><span>Signature et cachet du client</span></div>` : `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Qté</th><th class="rt">P.U. HT</th><th class="rt">TVA</th><th class="rt">Total HT</th></tr></thead>
+    <div style="display:flex;justify-content:space-between;margin-top:50px"><span>${opts.sign1 || 'Signature du livreur'}</span><span>${opts.sign2 || 'Signature et cachet du client'}</span></div>` : `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Qté</th><th class="rt">P.U. HT</th><th class="rt">TVA</th><th class="rt">Total HT</th></tr></thead>
     <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td><td class="rt">${plain(l.unit_price)}</td><td class="rt">${l.tva} %</td><td class="rt">${plain(l.total_ht)}</td></tr>`).join('')}</tbody></table>
     <div class="inv-tot"><div><span>Total HT</span><span>${plain(inv.total_ht)}</span></div>
       ${Object.entries(byRate).map(([r, v]) => `<div><span>TVA ${r} %</span><span>${plain(v)}</span></div>`).join('')}
@@ -647,7 +649,10 @@ async function pageProducts() {
     <label>Désignation<input name="name" value="${esc(p.name)}" required></label>
     <div class="grid2"><label>Référence<input name="ref" value="${esc(p.ref)}"></label><label>Unité<input name="unit" value="${esc(p.unit)}" placeholder="pièce, heure, kg…"></label>
     <label>Prix unitaire HT (DT)<input name="unit_price" type="number" inputmode="decimal" step="0.001" min="0" value="${esc(p.unit_price ?? '')}"></label>
-    <label>TVA<select name="tva">${S.me.tva_rates.map(r => `<option value="${r}" ${Number(p.tva ?? 19) === r ? 'selected' : ''}>${r} %</option>`).join('')}</select></label></div>
+    <label>TVA<select name="tva">${S.me.tva_rates.map(r => `<option value="${r}" ${Number(p.tva ?? 19) === r ? 'selected' : ''}>${r} %</option>`).join('')}</select></label>
+    <label>Prix d'achat HT (DT)<input name="purchase_price" type="number" inputmode="decimal" step="0.001" min="0" value="${esc(p.purchase_price ?? '')}"></label>
+    <label>Alerte si stock inférieur ou égal à<input name="stock_alert" type="number" inputmode="decimal" step="any" min="0" value="${esc(p.stock_alert ?? '')}"></label></div>
+    <label class="check"><input type="checkbox" name="track_stock" ${p.track_stock ? 'checked' : ''}> Suivre le stock de cet article</label>
     <div class="row-actions"><button class="btn primary" type="submit">Enregistrer l'article</button><button type="button" class="btn" data-close>Annuler</button>${p.id ? '<button type="button" class="btn danger" id="pdel">Supprimer</button>' : ''}</div></form>`;
   const open = p => modal(form(p), (m, close) => {
     const f = m.querySelector('form');
@@ -658,21 +663,198 @@ async function pageProducts() {
     const q = (document.getElementById('q')?.value || '').toLowerCase();
     const f = rows.filter(p => !q || (p.name + ' ' + (p.ref || '')).toLowerCase().includes(q));
     document.getElementById('lst').innerHTML = !rows.length ? '<div class="list"><div class="empty">Aucun article. Ajoutez vos produits ou services les plus vendus pour facturer plus vite.</div></div>'
-      : `<div class="list">${f.map(p => `<button type="button" class="item" data-p="${p.id}" style="width:100%;border:0;border-bottom:1px solid var(--line);background:none;text-align:left;cursor:pointer"><div class="main"><div class="t">${esc(p.name)}</div><div class="m">${esc([p.ref, p.unit, 'TVA ' + p.tva + ' %'].filter(Boolean).join(' · '))}</div></div><div class="r">${amt(p.unit_price)}<div class="sub">HT</div></div></button>`).join('') || '<div class="empty">Aucun résultat.</div>'}</div>`;
+      : `<div class="list">${f.map(p => `<button type="button" class="item" data-p="${p.id}" style="width:100%;border:0;border-bottom:1px solid var(--line);background:none;text-align:left;cursor:pointer"><div class="main"><div class="t">${esc(p.name)}</div><div class="m">${esc([p.ref, p.unit, 'TVA ' + p.tva + ' %', p.track_stock ? 'stock ' + Number(p.stock) : ''].filter(Boolean).join(' · '))}</div></div><div class="r">${amt(p.unit_price)}<div class="sub">HT</div></div></button>`).join('') || '<div class="empty">Aucun résultat.</div>'}</div>`;
     document.querySelectorAll('[data-p]').forEach(b => b.onclick = () => open(rows.find(p => p.id === Number(b.dataset.p))));
   };
   draw(); const q = document.getElementById('q'); if (q) q.oninput = draw;
   document.getElementById('new').onclick = () => open({});
 }
 
+
+// ---------- achats ----------
+const P_STATUS = { payee: ['Payée', 'payee'], retard: ['En retard', 'retard'], partielle: ['Partielle', 'partielle'], attente: ['À payer', 'attente'], emis: ['En cours', 'attente'], converti: ['Transformé', 'payee'] };
+const P_NEW = { commande: 'Nouvelle commande fournisseur', reception: 'Nouveau bon de réception', facture: 'Nouvelle facture d\'achat' };
+const P_PLURAL = { commande: 'Commandes fournisseurs', reception: 'Bons de réception', facture: 'Factures d\'achat' };
+function pTag(p) { const [l, c] = P_STATUS[p.pay_status] || [p.pay_status, 'attente']; return `<span class="tag ${c}">${l}</span>`; }
+function purchaseTabs(active) {
+  const t = [['#/achats', 'Fournisseurs'], ['#/achats/commande', 'Commandes'], ['#/achats/reception', 'Réceptions'], ['#/achats/facture', 'Factures d\'achat'], ['#/stock', 'Stock']];
+  return `<nav class="tabs seg" aria-label="Achats">${t.map(([h, l]) => `<a href="${h}" class="${h === active ? 'on' : ''}" ${h === active ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>`;
+}
+function purchaseList(rows, empty = 'Aucun document.') {
+  if (!rows.length) return `<div class="list"><div class="empty">${empty}</div></div>`;
+  return `<div class="list">${rows.map(p => `<a class="item ${p.pay_status === 'retard' ? 's-retard' : p.pay_status === 'payee' || p.pay_status === 'converti' ? 's-payee' : p.type === 'facture' && p.days_overdue >= -7 ? 's-soon' : ''}" href="#/achat/${p.id}">
+    <div class="main"><div class="t">${esc(p.supplier_name)}</div><div class="m">${esc(p.number)}${p.supplier_ref ? ' · réf. ' + esc(p.supplier_ref) : ''} · ${p.type === 'facture' ? 'échéance ' + fdate(p.due_date) : fdate(p.issue_date)}</div></div>
+    <div class="r">${amt(p.type === 'facture' && p.pay_status !== 'payee' ? p.balance : p.total_ttc)}<div>${pTag(p)}</div></div></a>`).join('')}</div>`;
+}
+function supplierModal(sp = {}, done) {
+  modal(`<h2>${sp.id ? 'Modifier le fournisseur' : 'Nouveau fournisseur'}</h2><form novalidate>
+    <label>Nom ou raison sociale<input name="name" required value="${esc(sp.name)}"></label>
+    <div class="grid2"><label>Matricule fiscal<input name="matricule_fiscal" value="${esc(sp.matricule_fiscal)}"></label><label>Contact<input name="contact_name" value="${esc(sp.contact_name)}"></label>
+    <label>Téléphone<input name="phone" type="tel" value="${esc(sp.phone)}"></label><label>E-mail<input name="email" type="email" value="${esc(sp.email)}"></label>
+    <label>Adresse<input name="address" value="${esc(sp.address)}"></label><label>Ville<input name="city" value="${esc(sp.city)}"></label></div>
+    <label>Notes<textarea name="notes">${esc(sp.notes)}</textarea></label>
+    <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le fournisseur</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form');
+    f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { const r = sp.id ? await api('PUT', '/suppliers/' + sp.id, formData(f)) : await api('POST', '/suppliers', formData(f)); close(); toast('Fournisseur enregistré'); done(sp.id || r.id); }); };
+  });
+}
+async function pageSuppliers() {
+  loading('#/achats');
+  const rows = await api('GET', '/suppliers');
+  const due = rows.reduce((s, r) => s + r.balance, 0);
+  shell('#/achats', `${purchaseTabs('#/achats')}<div class="head"><h1>Fournisseurs</h1><button class="btn primary" id="new">Ajouter un fournisseur</button></div>
+    ${due > 0 ? `<p class="sub" style="margin-top:-6px">Vous devez au total ${amt(due)} à vos fournisseurs.</p>` : ''}
+    <div class="list">${rows.length ? rows.map(r => `<a class="item ${r.overdue > 0 ? 's-retard' : ''}" href="#/fournisseurs/${r.id}"><div class="main"><div class="t">${esc(r.name)}</div><div class="m">${esc([r.city, r.phone].filter(Boolean).join(' · ') || r.purchase_count + ' facture(s) d\'achat')}</div></div><div class="r">${r.balance > 0 ? amt(r.balance) : '<span class="sub">soldé</span>'}</div></a>`).join('') : '<div class="empty">Aucun fournisseur. Ajoutez ceux chez qui vous achetez pour suivre vos commandes, réceptions et ce que vous leur devez.</div>'}</div>`);
+  document.getElementById('new').onclick = () => supplierModal({}, id => { location.hash = '#/fournisseurs/' + id; });
+}
+async function pageSupplier(id) {
+  loading('#/achats');
+  const { supplier: sp, purchases } = await api('GET', '/suppliers/' + id);
+  const factures = purchases.filter(p => p.type === 'facture');
+  const bal = factures.reduce((s, p) => s + p.balance, 0);
+  shell('#/achats', `<a class="back" href="#/achats">‹ Fournisseurs</a>
+    <div class="head"><h1>${esc(sp.name)}</h1><button class="btn" id="edit">Modifier</button></div>
+    <div class="row-actions" style="margin:-4px 0 16px">${sp.phone ? `<a class="btn small" href="tel:${esc(sp.phone)}">Appeler</a><a class="btn small wa" target="_blank" rel="noopener" href="https://wa.me/${phoneIntl(sp.phone)}">WhatsApp</a>` : ''}${sp.email ? `<a class="btn small" href="mailto:${esc(sp.email)}">E-mail</a>` : ''}
+      <a class="btn small primary" href="#/achats/commande/nouveau?supplier=${sp.id}">Commander</a><a class="btn small" href="#/achats/facture/nouveau?supplier=${sp.id}">Saisir une facture</a></div>
+    <div class="ledger"><div><div class="k">Vous lui devez</div><div class="v ${factures.some(p => p.pay_status === 'retard') ? 'pome' : ''}">${amt(bal, false)}</div></div><div><div class="k">Total acheté</div><div class="v">${amt(factures.reduce((s, p) => s + p.total_ttc, 0), false)}</div></div></div>
+    <h2>Documents</h2>${purchaseList(purchases, 'Aucun achat chez ce fournisseur.')}
+    <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer le fournisseur</button></div>`);
+  document.getElementById('edit').onclick = () => supplierModal(sp, () => pageSupplier(id));
+  document.getElementById('del').onclick = async e => { if (!await confirmBox(`Supprimer ${sp.name} ?`)) return; guard(e.target, async () => { await api('DELETE', '/suppliers/' + id); toast('Fournisseur supprimé'); location.hash = '#/achats'; }); };
+}
+async function pagePurchases(type) {
+  loading('#/achats');
+  const rows = (await api('GET', '/purchases')).filter(p => p.type === type);
+  const help = { commande: 'Préparez vos commandes fournisseurs, puis transformez-les en réception quand la marchandise arrive.', reception: 'Le bon de réception fait entrer la marchandise en stock.', facture: 'Saisissez les factures de vos fournisseurs pour suivre ce que vous devez et quand payer.' }[type];
+  const due = type === 'facture' ? rows.reduce((s, p) => s + p.balance, 0) : 0;
+  shell('#/achats', `${purchaseTabs('#/achats/' + type)}<div class="head"><h1>${P_PLURAL[type]}</h1><a class="btn primary" href="#/achats/${type}/nouveau">${P_NEW[type]}</a></div>
+    ${due > 0 ? `<p class="sub" style="margin-top:-6px">Reste à payer : ${amt(due)}</p>` : ''}
+    ${purchaseList(rows, help)}`);
+}
+async function pagePurchaseEdit(type, id) {
+  loading('#/achats');
+  const [suppliers, products] = await Promise.all([api('GET', '/suppliers'), api('GET', '/products')]);
+  if (!suppliers.length) { shell('#/achats', `${purchaseTabs('#/achats/' + type)}<h1>${P_NEW[type]}</h1><div class="list"><div class="empty">Ajoutez d'abord un fournisseur.<br><a class="btn primary" href="#/achats">Ajouter un fournisseur</a></div></div>`); return; }
+  const pre = Number(new URLSearchParams(location.hash.split('?')[1] || '').get('supplier')) || '';
+  const d = id ? await api('GET', '/purchases/' + id) : { supplier_id: pre, issue_date: S.me.today, due_date: type === 'facture' ? addDays(S.me.today, 30) : '', items: [], timbre: type === 'facture' ? 1 : 0, notes: '' };
+  if (id) type = d.type;
+  // pour les achats, proposer le prix d'achat de l'article
+  const prods = products.map(p => ({ ...p, unit_price: p.purchase_price ?? p.unit_price }));
+  const back = id ? '#/achat/' + id : '#/achats/' + type;
+  shell('#/achats', `<a class="back" href="${back}">‹ Retour</a><h1>${id ? 'Modifier ' + esc(d.number) : P_NEW[type]}</h1>
+    <form id="pf" class="panel" novalidate><div class="grid2">
+      <label>Fournisseur<select name="supplier_id" required><option value="">Choisir…</option>${suppliers.map(x => `<option value="${x.id}" ${x.id === d.supplier_id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+      <label>${type === 'facture' ? 'N° de facture du fournisseur' : 'Référence du fournisseur'}<input name="supplier_ref" value="${esc(d.supplier_ref || '')}"></label>
+      <label>Date<input name="issue_date" type="date" value="${esc(d.issue_date)}" required></label>
+      ${type !== 'reception' ? `<label>${type === 'facture' ? 'Échéance de paiement' : 'Livraison prévue le'}<input name="due_date" type="date" value="${esc(d.due_date || '')}"></label>` : ''}
+    </div>
+    ${linesBlock(d.items, prods)}
+    ${type === 'facture' ? `<label class="check" style="margin-top:14px"><input type="checkbox" name="timbre" ${d.timbre ? 'checked' : ''}> Timbre fiscal (1,000 DT)</label>` : ''}
+    <div class="totals" id="tot"></div>
+    ${type !== 'commande' ? '<p class="sub">Les lignes liées à un article suivi en stock font entrer la marchandise dans votre dépôt principal.</p>' : ''}
+    <label style="margin-top:12px">Notes<textarea name="notes">${esc(d.notes)}</textarea></label>
+    <div class="row-actions"><button class="btn primary" type="submit">${id ? 'Enregistrer les modifications' : 'Créer'}</button><a class="btn" href="${back}">Annuler</a></div></form>`);
+  const f = document.getElementById('pf');
+  const { readLines } = lineEditor(f, prods, () => !!(f.elements.timbre && f.elements.timbre.checked));
+  f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
+    const x = formData(f);
+    const body = { type, supplier_id: Number(x.supplier_id), supplier_ref: x.supplier_ref, issue_date: x.issue_date, due_date: x.due_date || null, timbre: !!(f.elements.timbre && f.elements.timbre.checked), notes: x.notes, items: readLines() };
+    const r = id ? await api('PUT', '/purchases/' + id, body) : await api('POST', '/purchases', body);
+    toast(id ? 'Document enregistré' : `${S.me.purchase_types[type].label} ${r.number} créé`); location.hash = '#/achat/' + (id || r.id);
+  }); };
+}
+async function pagePurchase(id) {
+  loading('#/achats');
+  const d = await api('GET', '/purchases/' + id);
+  const K = S.me.purchase_types[d.type];
+  const locked = d.status === 'converti';
+  shell('#/achats', `<a class="back" href="#/achats/${d.type}">‹ ${P_PLURAL[d.type]}</a>
+    <div class="head"><h1>${esc(d.number)}</h1>${pTag(d)}</div>
+    <p class="sub" style="margin-top:-8px">${esc(K.label)} · <a href="#/fournisseurs/${d.supplier_id}">${esc(d.supplier_name)}</a> · ${fdate(d.issue_date)}${d.supplier_ref ? ' · réf. ' + esc(d.supplier_ref) : ''}${d.type === 'facture' ? ' · échéance ' + fdate(d.due_date) : ''}</p>
+    ${d.linked_id ? `<div class="banner info">Transformé en <a href="#/achat/${d.linked_id}">${esc(d.linked_number)}</a></div>` : ''}
+    <div class="ledger"><div><div class="k">Total TTC</div><div class="v">${amt(d.total_ttc, false)}</div></div>${d.type === 'facture' ? `<div><div class="k">Reste à payer</div><div class="v ${d.pay_status === 'retard' ? 'pome' : ''}">${amt(d.balance, false)}</div></div>` : `<div><div class="k">Total HT</div><div class="v">${amt(d.total_ht, false)}</div></div>`}</div>
+    <div class="row-actions" style="margin-top:14px">
+      ${d.type === 'facture' && d.pay_status !== 'payee' ? '<button class="btn primary" id="pay">Enregistrer un paiement</button>' : ''}
+      ${d.type === 'commande' && !locked ? '<button class="btn primary" data-conv="reception">Marchandise reçue</button><button class="btn" data-conv="facture">Transformer en facture d\'achat</button>' : ''}
+      ${d.type === 'reception' && !locked ? '<button class="btn primary" data-conv="facture">Saisir la facture</button>' : ''}
+      <button class="btn" id="print-btn">Imprimer / PDF</button>
+      ${!locked ? `<a class="btn" href="#/achat/${d.id}/modifier">Modifier</a>` : ''}
+    </div>
+    <h2>Lignes</h2>
+    <div class="list">${d.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}</div>
+    ${d.type === 'facture' ? `<h2>Paiements faits</h2><div class="list">${d.payments.length ? d.payments.map(p => `<div class="item s-payee"><div class="main"><div class="t">${fdate(p.paid_on)} · ${esc(p.method)}</div><div class="m">${p.reference ? 'réf. ' + esc(p.reference) : 'sans référence'}</div></div><div class="r">${amt(p.amount)}<div><button class="btn small danger" data-delpay="${p.id}">Annuler</button></div></div></div>`).join('') : '<div class="empty">Aucun paiement fait pour cette facture.</div>'}</div>` : ''}
+    ${d.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(d.notes)}</div>` : ''}
+    <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer</button></div>`);
+  document.getElementById('print-btn').onclick = () => printInvoice(d, d.type, { label: K.label, party: d.supplier, qtyOnly: d.type === 'reception', sign1: 'Réceptionné par', sign2: 'Signature du livreur' });
+  document.querySelectorAll('[data-conv]').forEach(b => b.onclick = () => {
+    if (b.dataset.conv === 'facture') return modal(`<h2>Facture du fournisseur</h2><form novalidate><label>N° de la facture du fournisseur<input name="supplier_ref"></label><div class="row-actions"><button class="btn primary" type="submit">Créer la facture d'achat</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+      const f = m.querySelector('form'); f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { const r = await api('POST', `/purchases/${id}/convert`, { to: 'facture', supplier_ref: f.elements.supplier_ref.value }); close(); toast(`Facture d'achat ${r.number} créée`); location.hash = '#/achat/' + r.id; }); };
+    });
+    guard(b, async () => { const r = await api('POST', `/purchases/${id}/convert`, { to: 'reception' }); toast(`Bon de réception ${r.number} créé, stock mis à jour`); location.hash = '#/achat/' + r.id; });
+  });
+  const pay = document.getElementById('pay');
+  if (pay) pay.onclick = () => modal(`<h2>Paiement · ${esc(d.number)}</h2><p class="sub">${esc(d.supplier_name)} · reste ${plain(d.balance)}</p><form novalidate>
+    <label>Montant payé (DT)<input name="amount" type="number" inputmode="decimal" step="0.001" min="0" value="${d.balance.toFixed(3)}"></label>
+    <div class="grid2"><label>Date<input name="paid_on" type="date" value="${S.me.today}"></label><label>Mode<select name="method">${S.me.methods.map(x => `<option>${x}</option>`).join('')}</select></label></div>
+    <label>Référence (n° de chèque, virement…)<input name="reference"></label>
+    <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le paiement</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form'); f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { const x = formData(f); await api('POST', `/purchases/${id}/payments`, { ...x, amount: Number(x.amount) }); close(); toast('Paiement enregistré'); pagePurchase(id); }); };
+  });
+  document.querySelectorAll('[data-delpay]').forEach(b => b.onclick = async () => { if (!await confirmBox('Annuler ce paiement ?', 'Annuler le paiement')) return; guard(b, async () => { await api('DELETE', '/purchase-payments/' + b.dataset.delpay); toast('Paiement annulé'); pagePurchase(id); }); });
+  document.getElementById('del').onclick = async e => { if (!await confirmBox(`Supprimer ${d.number} ?${d.type !== 'commande' ? ' Les entrées de stock liées seront annulées.' : ''}`)) return; guard(e.target, async () => { await api('DELETE', '/purchases/' + id); toast('Document supprimé'); location.hash = '#/achats/' + d.type; }); };
+}
+
+// ---------- stock ----------
+const MOVE_LABEL = { entree: 'Entrée', sortie: 'Sortie', inventaire: 'Inventaire', transfert: 'Transfert' };
+const SOURCE_LABEL = { invoice: 'facture', document: 'bon de livraison', achat: 'achat', manuel: 'saisie manuelle' };
+async function pageStock() {
+  loading('#/achats');
+  const [{ products, warehouses }, moves, allProducts] = await Promise.all([api('GET', '/stock'), api('GET', '/stock/moves'), api('GET', '/products')]);
+  const whName = id => warehouses.find(w => w.id === id)?.name || '';
+  const value = products.reduce((s, p) => s + Math.max(0, p.stock) * (p.purchase_price || 0), 0);
+  shell('#/achats', `${purchaseTabs('#/stock')}<div class="head"><h1>Stock</h1><button class="btn primary" id="mv">Mouvement de stock</button></div>
+    <div class="ledger"><div><div class="k">Articles suivis</div><div class="v">${products.length}</div></div><div><div class="k">Valeur au prix d'achat</div><div class="v">${amt(value, false)}</div></div></div>
+    <h2>Quantités</h2>
+    <div class="list">${products.length ? products.map(p => { const low = p.stock <= (p.stock_alert || 0); return `<div class="item ${p.stock < 0 ? 's-retard' : low ? 's-soon' : ''}"><div class="main"><div class="t">${esc(p.name)}</div><div class="m">${esc([p.ref, warehouses.length > 1 ? p.by_warehouse.filter(w => w.qty != 0).map(w => whName(w.warehouse_id) + ' ' + Number(w.qty)).join(', ') : ''].filter(Boolean).join(' · '))}${p.stock_alert != null ? ' · alerte à ' + Number(p.stock_alert) : ''}</div></div><div class="r"><b style="font-size:18px">${Number(p.stock)}</b> ${esc(p.unit || '')}${low ? `<div><span class="tag ${p.stock < 0 ? 'retard' : 'soon'}">${p.stock < 0 ? 'négatif' : 'stock bas'}</span></div>` : ''}</div></div>`; }).join('')
+      : '<div class="empty">Aucun article suivi. Dans Ventes, Articles, cochez « Suivre le stock » sur vos produits, ou saisissez directement un mouvement.</div>'}</div>
+    <h2>Dépôts</h2>
+    <div class="list">${warehouses.map(w => `<div class="item"><div class="main"><div class="t">${esc(w.name)}</div></div><div class="r"><button class="btn small" data-wren="${w.id}" data-n="${esc(w.name)}">Renommer</button>${warehouses.length > 1 ? ` <button class="btn small danger" data-wdel="${w.id}">Supprimer</button>` : ''}</div></div>`).join('')}</div>
+    <div class="row-actions"><button class="btn small" id="addwh">Ajouter un dépôt</button></div>
+    <h2>Derniers mouvements</h2>
+    <div class="list">${moves.length ? moves.slice(0, 80).map(m => `<div class="item ${m.qty > 0 ? 's-payee' : ''}"><div class="main"><div class="t">${esc(m.product_name)}</div><div class="m">${fdate(m.moved_on)} · ${MOVE_LABEL[m.kind] || m.kind} · ${esc(m.warehouse_name)} · ${SOURCE_LABEL[m.source] || m.source}${m.ref ? ' ' + esc(m.ref) : ''}</div></div><div class="r"><b>${m.qty > 0 ? '+' : ''}${Number(m.qty)}</b>${m.source === 'manuel' ? `<div><button class="btn small danger" data-mdel="${m.id}">Annuler</button></div>` : ''}</div></div>`).join('') : '<div class="empty">Aucun mouvement pour le moment.</div>'}</div>`);
+  document.getElementById('mv').onclick = () => {
+    if (!allProducts.length) { toast('Créez d\'abord un article dans Ventes, Articles', true); return; }
+    modal(`<h2>Mouvement de stock</h2><form novalidate>
+      <label>Type<select name="kind"><option value="entree">Entrée (achat, retour client)</option><option value="sortie">Sortie (casse, usage interne)</option><option value="inventaire">Inventaire (quantité comptée)</option>${warehouses.length > 1 ? '<option value="transfert">Transfert entre dépôts</option>' : ''}</select></label>
+      <label>Article<select name="product_id">${allProducts.map(p => `<option value="${p.id}">${esc(p.name)}${p.ref ? ' · ' + esc(p.ref) : ''}</option>`).join('')}</select></label>
+      <div class="grid2"><label>Dépôt<select name="warehouse_id">${warehouses.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select></label>
+      <label class="to" hidden>Vers le dépôt<select name="to_warehouse_id">${warehouses.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select></label>
+      <label><span class="ql">Quantité</span><input name="qty" type="number" inputmode="decimal" step="any" min="0"></label>
+      <label>Date<input name="moved_on" type="date" value="${S.me.today}"></label></div>
+      <label>Motif<input name="ref" placeholder="ex. casse, retour, inventaire de fin d'année"></label>
+      <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le mouvement</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+      const f = m.querySelector('form');
+      f.elements.kind.onchange = () => { m.querySelector('.to').hidden = f.elements.kind.value !== 'transfert'; m.querySelector('.ql').textContent = f.elements.kind.value === 'inventaire' ? 'Quantité comptée' : 'Quantité'; };
+      f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { await api('POST', '/stock/moves', formData(f)); close(); toast('Mouvement enregistré'); pageStock(); }); };
+    });
+  };
+  const whModal = (w = {}) => modal(`<h2>${w.id ? 'Renommer le dépôt' : 'Nouveau dépôt'}</h2><form novalidate><label>Nom<input name="name" value="${esc(w.name || '')}"></label><div class="row-actions"><button class="btn primary" type="submit">Enregistrer le dépôt</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form'); f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { w.id ? await api('PUT', '/warehouses/' + w.id, formData(f)) : await api('POST', '/warehouses', formData(f)); close(); toast('Dépôt enregistré'); pageStock(); }); };
+  });
+  document.getElementById('addwh').onclick = () => whModal();
+  document.querySelectorAll('[data-wren]').forEach(b => b.onclick = () => whModal({ id: b.dataset.wren, name: b.dataset.n }));
+  document.querySelectorAll('[data-wdel]').forEach(b => b.onclick = async () => { if (!await confirmBox('Supprimer ce dépôt ?')) return; guard(b, async () => { await api('DELETE', '/warehouses/' + b.dataset.wdel); toast('Dépôt supprimé'); pageStock(); }); });
+  document.querySelectorAll('[data-mdel]').forEach(b => b.onclick = async () => { if (!await confirmBox('Annuler ce mouvement ?', 'Annuler le mouvement')) return; guard(b, async () => { await api('DELETE', '/stock/moves/' + b.dataset.mdel); toast('Mouvement annulé'); pageStock(); }); });
+}
+
 // ---------- paiements ----------
 async function pagePayments() {
-  loading('#/paiements');
+  loading('#/factures');
   const [rows, invs] = await Promise.all([api('GET', '/payments'), api('GET', '/invoices')]);
   const open = invs.filter(i => i.status !== 'payee');
   const month = S.me.today.slice(0, 7);
   const tm = rows.filter(p => p.paid_on.startsWith(month)).reduce((s, p) => s + p.amount, 0);
-  shell('#/paiements', `<div class="head"><h1>Paiements</h1>${open.length ? '<button class="btn primary" id="new">Enregistrer un paiement</button>' : ''}</div>
+  shell('#/factures', `${salesTabs('#/paiements')}<div class="head"><h1>Encaissements</h1>${open.length ? '<button class="btn primary" id="new">Enregistrer un paiement</button>' : ''}</div>
     <p class="sub">Encaissé ce mois : ${amt(tm)}</p>
     <div class="list">${rows.length ? rows.map(p => `<a class="item s-payee" href="#/factures/${p.invoice_id}"><div class="main"><div class="t">${esc(p.client_name)}</div><div class="m">${fdate(p.paid_on)} · ${esc(p.method)} · ${esc(p.number)}${p.reference ? ' · ' + esc(p.reference) : ''}</div></div><div class="r">${amt(p.amount)}</div></a>`).join('') : '<div class="empty">Aucun paiement enregistré. Ouvrez une facture pour saisir un règlement.</div>'}</div>`);
   const nb = document.getElementById('new');
@@ -694,6 +876,8 @@ async function pageAlerts() {
     ${invoiceList(al.overdue, 'Aucune facture en retard.')}
     <h2>À échoir dans les 7 jours${al.upcoming.length ? ` · ${amt(total(al.upcoming))}` : ''}</h2>
     ${invoiceList(al.upcoming, 'Aucune échéance cette semaine.')}
+    ${al.supplier_due.length ? `<h2>Fournisseurs à payer · ${amt(al.supplier_due.reduce((s, p) => s + p.balance, 0))}</h2>${purchaseList(al.supplier_due)}` : ''}
+    ${al.low_stock.length ? `<h2>Stock bas</h2><div class="list">${al.low_stock.map(p => `<a class="item s-retard" href="#/stock"><div class="main"><div class="t">${esc(p.name)}</div><div class="m">alerte à ${Number(p.stock_alert || 0)}</div></div><div class="r"><b>${Number(p.stock)}</b> ${esc(p.unit || '')}</div></a>`).join('')}</div>` : ''}
     <p class="sub" style="margin-top:16px">Ouvrez une facture pour relancer le client par WhatsApp, SMS ou e-mail avec un message déjà rédigé.</p>`);
 }
 
@@ -892,6 +1076,13 @@ async function router() {
     if ((m = h.match(/^#\/doc\/(\d+)\/modifier$/))) return await pageDocEdit(null, m[1]);
     if ((m = h.match(/^#\/doc\/(\d+)$/))) return await pageDoc(m[1]);
     if (h === '#/articles') return await pageProducts();
+    if (h === '#/achats') return await pageSuppliers();
+    if ((m = h.match(/^#\/fournisseurs\/(\d+)$/))) return await pageSupplier(m[1]);
+    if ((m = h.match(/^#\/achats\/(commande|reception|facture)$/))) return await pagePurchases(m[1]);
+    if ((m = h.match(/^#\/achats\/(commande|reception|facture)\/nouveau$/))) return await pagePurchaseEdit(m[1]);
+    if ((m = h.match(/^#\/achat\/(\d+)\/modifier$/))) return await pagePurchaseEdit(null, m[1]);
+    if ((m = h.match(/^#\/achat\/(\d+)$/))) return await pagePurchase(m[1]);
+    if (h === '#/stock') return await pageStock();
     if (h === '#/paiements') return await pagePayments();
     if (h === '#/alertes') return await pageAlerts();
     if (h === '#/parametres') return await pageSettings();

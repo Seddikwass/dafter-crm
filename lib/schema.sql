@@ -112,3 +112,81 @@ CREATE TABLE IF NOT EXISTS documents (
   UNIQUE (company_id, type, number)
 );
 CREATE INDEX IF NOT EXISTS documents_company ON documents(company_id, type, issue_date);
+
+ALTER TABLE products ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS stock_alert NUMERIC(14,3);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS purchase_price NUMERIC(14,3);
+
+CREATE TABLE IF NOT EXISTS warehouses (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS stock_moves (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  warehouse_id INT NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
+  qty NUMERIC(14,3) NOT NULL,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manuel',
+  source_id INT,
+  ref TEXT,
+  moved_on DATE NOT NULL DEFAULT CURRENT_DATE,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS stock_moves_product ON stock_moves(product_id, warehouse_id);
+CREATE INDEX IF NOT EXISTS stock_moves_source ON stock_moves(company_id, source, source_id);
+
+CREATE TABLE IF NOT EXISTS suppliers (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  matricule_fiscal TEXT,
+  contact_name TEXT,
+  phone TEXT,
+  email TEXT,
+  address TEXT,
+  city TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS suppliers_company ON suppliers(company_id);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  supplier_id INT NOT NULL REFERENCES suppliers(id) ON DELETE RESTRICT,
+  type TEXT NOT NULL,
+  number TEXT NOT NULL,
+  supplier_ref TEXT,
+  issue_date DATE NOT NULL,
+  due_date DATE,
+  items JSONB NOT NULL DEFAULT '[]',
+  total_ht NUMERIC(14,3) NOT NULL DEFAULT 0,
+  total_tva NUMERIC(14,3) NOT NULL DEFAULT 0,
+  timbre NUMERIC(14,3) NOT NULL DEFAULT 0,
+  total_ttc NUMERIC(14,3) NOT NULL DEFAULT 0,
+  notes TEXT,
+  status TEXT NOT NULL DEFAULT 'emis',
+  linked_id INT REFERENCES purchases(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (company_id, type, number)
+);
+CREATE INDEX IF NOT EXISTS purchases_company ON purchases(company_id, type, issue_date);
+
+CREATE TABLE IF NOT EXISTS purchase_payments (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  purchase_id INT NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+  amount NUMERIC(14,3) NOT NULL CHECK (amount > 0),
+  paid_on DATE NOT NULL,
+  method TEXT NOT NULL DEFAULT 'virement',
+  reference TEXT,
+  created_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS purchase_payments_purchase ON purchase_payments(purchase_id);
