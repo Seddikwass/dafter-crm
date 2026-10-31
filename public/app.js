@@ -134,8 +134,8 @@ function shell(active, content) {
   ];
   if (me.user.is_superadmin) links.push(['#/admin', 'shield', 'Abonnés']);
   let banner = '';
-  if (sub.state === 'trial') banner = `<div class="banner info">Essai gratuit : ${sub.days_left > 0 ? `il reste ${sub.days_left} jour${sub.days_left > 1 ? 's' : ''}` : "dernier jour aujourd'hui"}. <a href="#/parametres">Voir l'abonnement</a></div>`;
-  else if (sub.state === 'expired') banner = `<div class="banner err">Abonnement expiré : vos données restent consultables, mais la saisie est bloquée. <a href="#/parametres">Renouveler</a></div>`;
+  if (sub.state === 'trial') banner = `<div class="banner info">Essai Pro offert : ${sub.days_left > 0 ? `il reste ${sub.days_left} jour${sub.days_left > 1 ? 's' : ''}` : "dernier jour aujourd'hui"}. <a href="#/parametres">Voir l'abonnement</a></div>`;
+  else if (sub.state === 'free') banner = `<div class="banner ${me.invoices_this_month >= sub.free_limit ? 'warn' : 'info'}">Formule gratuite : ${me.invoices_this_month} / ${sub.free_limit} factures ce mois. <a href="#/parametres">Passer à Pro, 40 DT par mois</a></div>`;
   else if (sub.state === 'suspended') banner = `<div class="banner err">Compte suspendu. Contactez le support pour le réactiver.</div>`;
   else if (sub.days_left <= 5) banner = `<div class="banner warn">Votre abonnement se termine le ${fdate(sub.ends)}. <a href="#/parametres">Renouveler</a></div>`;
   root.innerHTML = `<div class="app">
@@ -153,20 +153,20 @@ function authPage(mode) {
     <section class="auth-side">
       <div class="brand">Dafter</div>
       <h1>Qui vous doit quoi, et pour quand.</h1>
-      <p>Clients, factures avec TVA et timbre fiscal, échéances et encaissements : tout le carnet de votre entreprise, sur téléphone et sur PC.</p>
+      <p>Factures avec TVA et timbre fiscal, devis, bons de livraison, avoirs, échéances et encaissements : toute la gestion commerciale de votre entreprise, sur téléphone et sur PC.</p>
       <div class="sample" aria-hidden="true">
         <div><span>Pharmacie El Manar · F2026-0041</span><span class="late">${amt(1250.5)}</span></div>
         <div><span>Atelier Ben Salah · échéance demain</span><span>${amt(384.2)}</span></div>
         <div><span>Café Le Jasmin · payée</span><span>${amt(96.39)}</span></div>
       </div>
       <div class="plans">
-        <div><b>Mensuel</b><span class="p">175 DT</span> par mois<br>Sans engagement</div>
-        <div><b>Annuel</b><span class="p">2 000 DT</span> par an<br>100 DT d'économie</div>
+        <div><b>Gratuit</b><span class="p">0 DT</span><br>20 factures par mois, 1 utilisateur</div>
+        <div><b>Pro</b><span class="p">40 DT</span> par mois<br>ou 400 DT par an, tout illimité</div>
       </div>
     </section>
     <section class="auth-form">
       <h2>${reg ? 'Créer le compte de votre entreprise' : 'Se connecter'}</h2>
-      ${reg ? '<p class="sub" style="margin-top:-10px">14 jours gratuits, sans carte bancaire.</p>' : ''}
+      ${reg ? '<p class="sub" style="margin-top:-10px">14 jours de Pro offerts, puis gratuit jusqu\'à 20 factures par mois.</p>' : ''}
       <form id="f" novalidate>
         <div class="err-msg" id="e"></div>
         ${reg ? `<label>Nom de l'entreprise<input name="companyName" required autocomplete="organization"></label>
@@ -249,6 +249,56 @@ function invoiceList(rows, emptyText, emptyAction = '') {
   return `<div class="list">${rows.map(i => `<a class="item ${stClass(i)}" href="#/factures/${i.id}">
     <div class="main"><div class="t">${esc(i.client_name)}</div><div class="m">${esc(i.number)} · échéance ${fdate(i.due_date)}${i.status === 'retard' ? ` · ${relDays(i.days_overdue)}` : i.status !== 'payee' && i.days_overdue >= -7 ? ` · ${relDays(i.days_overdue)}` : ''}</div></div>
     <div class="r">${amt(i.status === 'payee' ? i.total_ttc : i.balance)}<div>${tag(i)}</div></div></a>`).join('')}</div>`;
+}
+
+
+// ---------- lignes de document (factures, devis, bons) ----------
+function lineHtml(l = {}) {
+  return `<div class="line">
+    <label class="des">Désignation<input name="designation" list="prodlist" value="${esc(l.designation)}" required autocomplete="off"><input type="hidden" name="product_id" value="${esc(l.product_id || '')}"></label>
+    <label>Quantité<input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.qty ?? 1)}"></label>
+    <label>Prix unitaire HT<input name="unit_price" type="number" inputmode="decimal" step="0.001" min="0" value="${esc(l.unit_price)}"></label>
+    <label>TVA<select name="tva">${S.me.tva_rates.map(r => `<option value="${r}" ${Number(l.tva ?? 19) === r ? 'selected' : ''}>${r} %</option>`).join('')}</select></label>
+    <button type="button" class="btn small danger rm" aria-label="Retirer la ligne">Retirer</button></div>`;
+}
+function linesBlock(items, products) {
+  return `<h2 style="margin-top:8px">Lignes</h2>
+    <datalist id="prodlist">${products.map(p => `<option value="${esc(p.name)}">${esc([p.ref, plain(p.unit_price)].filter(Boolean).join(' · '))}</option>`).join('')}</datalist>
+    <div class="lines" id="lines">${(items.length ? items : [{}]).map(lineHtml).join('')}</div>
+    <div class="row-actions"><button type="button" class="btn small" id="add">Ajouter une ligne</button>${products.length ? '' : '<a class="btn small" href="#/articles">Créer un catalogue d\'articles</a>'}</div>`;
+}
+function lineEditor(f, products, timbreOn = () => false) {
+  const lines = f.querySelector('#lines');
+  const readLines = () => [...lines.querySelectorAll('.line')].map(l => {
+    const o = { designation: l.querySelector('[name=designation]').value, qty: Number(l.querySelector('[name=qty]').value), unit_price: Number(l.querySelector('[name=unit_price]').value), tva: Number(l.querySelector('[name=tva]').value) };
+    const pid = Number(l.querySelector('[name=product_id]').value); if (pid) o.product_id = pid;
+    return o;
+  });
+  const recalc = () => {
+    let ht = 0, tva = 0; const byRate = {};
+    readLines().forEach(l => { const h = Math.round((l.qty || 0) * (l.unit_price || 0) * 1000) / 1000; ht += h; const v = Math.round(h * l.tva / 100 * 1000) / 1000; tva += v; if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + v; });
+    const tb = timbreOn() ? 1 : 0;
+    f.querySelector('#tot').innerHTML = `<div><span>Total HT</span>${amt(ht)}</div>${Object.entries(byRate).map(([r, v]) => `<div><span>TVA ${r} %</span>${amt(v)}</div>`).join('')}${tb ? `<div><span>Timbre fiscal</span>${amt(1)}</div>` : ''}<div class="grand"><span>Total TTC</span>${amt(ht + tva + tb)}</div>`;
+  };
+  lines.addEventListener('input', e => {
+    if (e.target.name === 'designation') {
+      const line = e.target.closest('.line');
+      const p = products.find(x => x.name === e.target.value);
+      line.querySelector('[name=product_id]').value = p ? p.id : '';
+      if (p) { line.querySelector('[name=unit_price]').value = p.unit_price; line.querySelector('[name=tva]').value = p.tva; }
+    }
+    recalc();
+  });
+  lines.addEventListener('change', recalc);
+  if (f.elements.timbre) f.elements.timbre.addEventListener('change', recalc);
+  lines.addEventListener('click', e => { if (e.target.closest('.rm')) { if (lines.children.length > 1) { e.target.closest('.line').remove(); recalc(); } else toast('Gardez au moins une ligne', true); } });
+  f.querySelector('#add').onclick = () => { lines.insertAdjacentHTML('beforeend', lineHtml()); lines.lastElementChild.querySelector('input').focus(); };
+  recalc();
+  return { readLines, recalc };
+}
+function salesTabs(active) {
+  const t = [['#/factures', 'Factures'], ['#/docs/devis', 'Devis'], ['#/docs/commande', 'Commandes'], ['#/docs/livraison', 'Livraisons'], ['#/docs/avoir', 'Avoirs'], ['#/articles', 'Articles']];
+  return `<nav class="tabs seg" aria-label="Ventes">${t.map(([h, l]) => `<a href="${h}" class="${h === active ? 'on' : ''}" ${h === active ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>`;
 }
 
 // ---------- clients ----------
@@ -335,7 +385,7 @@ async function pageInvoices() {
   loading('#/factures');
   const rows = await api('GET', '/invoices');
   const tabs = [['all', 'Toutes'], ['open', 'À encaisser'], ['retard', 'En retard'], ['partielle', 'Partielles'], ['payee', 'Payées']];
-  shell('#/factures', `<div class="head"><h1>Factures</h1><a class="btn primary" href="#/factures/nouvelle">Nouvelle facture</a></div>
+  shell('#/factures', `${salesTabs('#/factures')}<div class="head"><h1>Factures</h1><a class="btn primary" href="#/factures/nouvelle">Nouvelle facture</a></div>
     ${rows.length ? `<div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" data-t="${k}" class="${S.invTab === k ? 'on' : ''}" aria-selected="${S.invTab === k}">${l}</button>`).join('')}</div>
     <input class="search" type="search" id="q" placeholder="Rechercher un numéro ou un client" aria-label="Rechercher">` : ''}
     <div id="lst"></div>`);
@@ -363,12 +413,7 @@ async function pageInvoiceEdit(id) {
     client_id: Number(preClient) || '', issue_date: t, due_date: addDays(t, S.me.company.default_due_days), timbre: 1,
     items: [{ designation: '', qty: 1, unit_price: '', tva: 19 }], notes: '',
   };
-  const lineHtml = (l = {}) => `<div class="line">
-    <label class="des">Désignation<input name="designation" value="${esc(l.designation)}" required></label>
-    <label>Quantité<input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.qty ?? 1)}"></label>
-    <label>Prix unitaire HT<input name="unit_price" type="number" inputmode="decimal" step="0.001" min="0" value="${esc(l.unit_price)}"></label>
-    <label>TVA<select name="tva">${S.me.tva_rates.map(r => `<option value="${r}" ${Number(l.tva ?? 19) === r ? 'selected' : ''}>${r} %</option>`).join('')}</select></label>
-    <button type="button" class="btn small danger rm" aria-label="Retirer la ligne">Retirer</button></div>`;
+  const products = await api('GET', '/products');
   shell('#/factures', `<a class="back" href="${id ? '#/factures/' + id : '#/factures'}">‹ Retour</a>
     <h1>${id ? 'Modifier la facture ' + esc(inv.number) : 'Nouvelle facture'}</h1>
     <form id="if" class="panel" novalidate>
@@ -379,27 +424,16 @@ async function pageInvoiceEdit(id) {
         <label>Échéance<input name="due_date" type="date" value="${esc(inv.due_date)}" required></label>
       </div>
       <h2 style="margin-top:8px">Lignes</h2>
-      <div class="lines" id="lines">${inv.items.map(lineHtml).join('')}</div>
-      <div class="row-actions"><button type="button" class="btn small" id="add">Ajouter une ligne</button></div>
+      ${linesBlock(inv.items, products)}
       <label class="check" style="margin-top:14px"><input type="checkbox" name="timbre" ${inv.timbre ? 'checked' : ''}> Timbre fiscal (1,000 DT)</label>
       <div class="totals" id="tot"></div>
       <label style="margin-top:12px">Notes (imprimées sur la facture)<textarea name="notes">${esc(inv.notes)}</textarea></label>
       <div class="row-actions"><button class="btn primary" type="submit">${id ? 'Enregistrer les modifications' : 'Créer la facture'}</button><a class="btn" href="${id ? '#/factures/' + id : '#/factures'}">Annuler</a></div>
     </form>`);
-  const f = document.getElementById('if'), lines = document.getElementById('lines');
+  const f = document.getElementById('if');
   const issue = f.elements.issue_date, due = f.elements.due_date;
   if (!id) issue.onchange = () => { due.value = addDays(issue.value, S.me.company.default_due_days); };
-  const readLines = () => [...lines.querySelectorAll('.line')].map(l => ({ designation: l.querySelector('[name=designation]').value, qty: Number(l.querySelector('[name=qty]').value), unit_price: Number(l.querySelector('[name=unit_price]').value), tva: Number(l.querySelector('[name=tva]').value) }));
-  const recalc = () => {
-    let ht = 0, tva = 0; const byRate = {};
-    readLines().forEach(l => { const h = Math.round((l.qty || 0) * (l.unit_price || 0) * 1000) / 1000; ht += h; const v = Math.round(h * l.tva / 100 * 1000) / 1000; tva += v; if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + v; });
-    const tb = f.elements.timbre.checked ? 1 : 0;
-    document.getElementById('tot').innerHTML = `<div><span>Total HT</span>${amt(ht)}</div>${Object.entries(byRate).map(([r, v]) => `<div><span>TVA ${r} %</span>${amt(v)}</div>`).join('')}${tb ? `<div><span>Timbre fiscal</span>${amt(1)}</div>` : ''}<div class="grand"><span>Total TTC</span>${amt(ht + tva + tb)}</div>`;
-  };
-  lines.addEventListener('input', recalc); lines.addEventListener('change', recalc); f.elements.timbre.onchange = recalc;
-  lines.addEventListener('click', e => { if (e.target.closest('.rm')) { if (lines.children.length > 1) { e.target.closest('.line').remove(); recalc(); } else toast('Une facture doit garder au moins une ligne', true); } });
-  document.getElementById('add').onclick = () => { lines.insertAdjacentHTML('beforeend', lineHtml()); lines.lastElementChild.querySelector('input').focus(); };
-  recalc();
+  const { readLines } = lineEditor(f, products, () => f.elements.timbre.checked);
   f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
     const d = formData(f);
     const body = { client_id: Number(d.client_id), number: d.number, issue_date: d.issue_date, due_date: d.due_date, timbre: f.elements.timbre.checked, notes: d.notes, items: readLines() };
@@ -439,6 +473,7 @@ async function pageInvoice(id) {
       ${inv.status !== 'payee' ? '<button class="btn primary" id="pay">Enregistrer un paiement</button>' : ''}
       <button class="btn" id="print-btn">Imprimer / PDF</button>
       <a class="btn" href="#/factures/${inv.id}/modifier">Modifier</a>
+      ${inv.status !== 'payee' ? `<a class="btn" href="#/docs/avoir/nouveau?invoice=${inv.id}">Créer un avoir</a>` : ''}
     </div>
     ${inv.status !== 'payee' ? `<h2>Relancer le client</h2>${reminderButtons(inv)}` : ''}
     <h2>Lignes</h2>
@@ -479,27 +514,153 @@ function paymentModal(inv, done) {
   });
 }
 
-function printInvoice(inv) {
+function printInvoice(inv, kind) {
   const co = S.me.company, c = inv.client;
+  const K = kind ? S.me.doc_types[kind] : { label: 'Facture' };
+  const qtyOnly = kind === 'livraison';
   const byRate = {}; inv.items.forEach(l => { if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + Math.round(l.total_ht * l.tva / 100 * 1000) / 1000; });
   document.getElementById('print').innerHTML = `
     <div class="inv-head">
       <div><h1>${esc(co.name)}</h1>${co.matricule_fiscal ? `MF : ${esc(co.matricule_fiscal)}<br>` : ''}${esc([co.address, co.city].filter(Boolean).join(', '))}<br>${esc([co.phone, co.email].filter(Boolean).join(' · '))}</div>
-      <div style="text-align:right"><h1>Facture</h1>N° <b>${esc(inv.number)}</b><br>Date : ${fdate(inv.issue_date)}<br>Échéance : ${fdate(inv.due_date)}</div>
+      <div style="text-align:right"><h1>${K.label}</h1>N° <b>${esc(inv.number)}</b><br>Date : ${fdate(inv.issue_date)}${inv.due_date ? `<br>Échéance : ${fdate(inv.due_date)}` : ''}${inv.valid_until ? `<br>${kind === 'devis' ? 'Valable jusqu\'au' : 'Livraison prévue le'} : ${fdate(inv.valid_until)}` : ''}${kind === 'avoir' && inv.invoice_number ? `<br>Sur facture : ${esc(inv.invoice_number)}` : ''}</div>
     </div>
     <div class="inv-box" style="margin-left:auto;width:50%"><b>${esc(c.name)}</b><br>${c.matricule_fiscal ? `MF : ${esc(c.matricule_fiscal)}<br>` : ''}${[c.address, c.city].some(Boolean) ? esc([c.address, c.city].filter(Boolean).join(', ')) + '<br>' : ''}${esc(c.phone || '')}</div>
-    <table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Qté</th><th class="rt">P.U. HT</th><th class="rt">TVA</th><th class="rt">Total HT</th></tr></thead>
+    ${qtyOnly ? `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Quantité</th></tr></thead>
+    <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td></tr>`).join('')}</tbody></table>
+    <div style="display:flex;justify-content:space-between;margin-top:50px"><span>Signature du livreur</span><span>Signature et cachet du client</span></div>` : `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Qté</th><th class="rt">P.U. HT</th><th class="rt">TVA</th><th class="rt">Total HT</th></tr></thead>
     <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td><td class="rt">${plain(l.unit_price)}</td><td class="rt">${l.tva} %</td><td class="rt">${plain(l.total_ht)}</td></tr>`).join('')}</tbody></table>
     <div class="inv-tot"><div><span>Total HT</span><span>${plain(inv.total_ht)}</span></div>
       ${Object.entries(byRate).map(([r, v]) => `<div><span>TVA ${r} %</span><span>${plain(v)}</span></div>`).join('')}
       ${inv.timbre ? `<div><span>Timbre fiscal</span><span>${plain(inv.timbre)}</span></div>` : ''}
       <div class="g"><span>Total TTC</span><span>${plain(inv.total_ttc)}</span></div>
       ${inv.paid > 0 ? `<div><span>Déjà réglé</span><span>${plain(inv.paid)}</span></div><div><b>Reste à payer</b><b>${plain(inv.balance)}</b></div>` : ''}</div>
-    <p class="inv-words">Arrêtée la présente facture à la somme de : ${amountWords(inv.total_ttc)}.</p>
+    <p class="inv-words">Arrêté${kind === 'facture' || !kind ? 'e la présente facture' : kind === 'devis' ? ' le présent devis' : kind === 'avoir' ? ' le présent avoir' : ' le présent bon'} à la somme de : ${amountWords(inv.total_ttc)}.</p>`}
     ${inv.notes ? `<p style="white-space:pre-wrap">${esc(inv.notes)}</p>` : ''}
     <div class="inv-foot">${esc(co.invoice_footer || '')}</div>`;
-  const title = document.title; document.title = `Facture ${inv.number}`;
+  const title = document.title; document.title = `${K.label} ${inv.number}`;
   window.print(); setTimeout(() => { document.title = title; }, 500);
+}
+
+
+// ---------- devis, bons, avoirs ----------
+const DOC_STATUS = { emis: ['Émis', 'attente'], accepte: ['Accepté', 'payee'], refuse: ['Refusé', 'retard'], converti: ['Facturé', 'payee'], impute: ['Déduit de la facture', 'payee'] };
+const DOC_NEW = { devis: 'Nouveau devis', commande: 'Nouveau bon de commande', livraison: 'Nouveau bon de livraison', avoir: 'Nouvel avoir' };
+const DOC_PLURAL = { devis: 'Devis', commande: 'Bons de commande', livraison: 'Bons de livraison', avoir: 'Avoirs' };
+function docTag(d) { const [l, c] = DOC_STATUS[d.status] || [d.status, 'attente']; return `<span class="tag ${c}">${l}</span>`; }
+
+async function pageDocs(type) {
+  loading('#/factures');
+  const rows = (await api('GET', '/documents')).filter(d => d.type === type);
+  const help = { devis: 'Proposez un prix, puis transformez le devis accepté en facture en un geste.', commande: 'Enregistrez les commandes de vos clients avant de livrer et facturer.', livraison: 'Imprimez le bon à faire signer à la livraison, puis facturez-le.', avoir: 'Un avoir annule tout ou partie d\'une facture : ouvrez la facture concernée et touchez « Créer un avoir ».' }[type];
+  shell('#/factures', `${salesTabs('#/docs/' + type)}<div class="head"><h1>${DOC_PLURAL[type]}</h1><a class="btn primary" href="#/docs/${type}/nouveau">${DOC_NEW[type]}</a></div>
+    ${rows.length ? '<input class="search" type="search" id="q" placeholder="Rechercher un numéro ou un client" aria-label="Rechercher">' : ''}
+    <div id="lst"></div>`);
+  const draw = () => {
+    const q = (document.getElementById('q')?.value || '').toLowerCase();
+    const f = rows.filter(d => !q || (d.number + ' ' + d.client_name).toLowerCase().includes(q));
+    document.getElementById('lst').innerHTML = !rows.length ? `<div class="list"><div class="empty">${help}<br><a class="btn primary" href="#/docs/${type}/nouveau">${DOC_NEW[type]}</a></div></div>`
+      : `<div class="list">${f.map(d => `<a class="item ${d.status === 'refuse' ? 's-retard' : d.status === 'converti' || d.status === 'impute' || d.status === 'accepte' ? 's-payee' : ''}" href="#/doc/${d.id}"><div class="main"><div class="t">${esc(d.client_name)}</div><div class="m">${esc(d.number)} · ${fdate(d.issue_date)}${d.invoice_number ? ' · ' + esc(d.invoice_number) : ''}</div></div><div class="r">${amt(d.total_ttc)}<div>${docTag(d)}</div></div></a>`).join('') || '<div class="empty">Aucun résultat.</div>'}</div>`;
+  };
+  draw(); const q = document.getElementById('q'); if (q) q.oninput = draw;
+}
+
+async function pageDocEdit(type, id) {
+  loading('#/factures');
+  const [clients, products] = await Promise.all([api('GET', '/clients'), api('GET', '/products')]);
+  if (!clients.length) { shell('#/factures', `<h1>${DOC_NEW[type]}</h1><div class="list"><div class="empty">Ajoutez d'abord un client.<br><a class="btn primary" href="#/clients/nouveau">Ajouter un client</a></div></div>`); return; }
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  let d = id ? await api('GET', '/documents/' + id) : { client_id: Number(params.get('client')) || '', issue_date: S.me.today, valid_until: type === 'devis' ? addDays(S.me.today, 30) : '', items: [], notes: '' };
+  if (id) type = d.type;
+  let inv = null;
+  if (!id && type === 'avoir' && params.get('invoice')) {
+    inv = await api('GET', '/invoices/' + params.get('invoice'));
+    d = { ...d, client_id: inv.client_id, invoice_id: inv.id, items: inv.items.map(l => ({ ...l })), notes: `Avoir sur facture ${inv.number}` };
+  }
+  const back = id ? '#/doc/' + id : inv ? '#/factures/' + inv.id : '#/docs/' + type;
+  shell('#/factures', `<a class="back" href="${back}">‹ Retour</a>
+    <h1>${id ? 'Modifier ' + esc(d.number) : DOC_NEW[type]}</h1>
+    ${inv ? `<div class="banner info">Sur la facture ${esc(inv.number)} · reste à payer ${plain(inv.balance)}. Ajustez les lignes pour ne garder que le montant à annuler : il sera déduit de la facture.</div>` : ''}
+    <form id="df" class="panel" novalidate>
+      <div class="grid2">
+        <label>Client<select name="client_id" required ${inv ? 'disabled' : ''}><option value="">Choisir…</option>${clients.map(c => `<option value="${c.id}" ${c.id === d.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+        <label>Date<input name="issue_date" type="date" value="${esc(d.issue_date)}" required></label>
+        ${type === 'devis' || type === 'commande' ? `<label>${type === 'devis' ? 'Valable jusqu\'au' : 'Livraison prévue le'}<input name="valid_until" type="date" value="${esc(d.valid_until || '')}"></label>` : ''}
+      </div>
+      ${linesBlock(d.items, products)}
+      <div class="totals" id="tot"></div>
+      <label style="margin-top:12px">Notes (imprimées)<textarea name="notes">${esc(d.notes)}</textarea></label>
+      <div class="row-actions"><button class="btn primary" type="submit">${id ? 'Enregistrer les modifications' : 'Créer'}</button><a class="btn" href="${back}">Annuler</a></div>
+    </form>`);
+  const f = document.getElementById('df');
+  const { readLines } = lineEditor(f, products);
+  f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
+    const x = formData(f);
+    const body = { type, client_id: inv ? inv.client_id : Number(x.client_id), issue_date: x.issue_date, valid_until: x.valid_until || null, notes: x.notes, items: readLines(), invoice_id: inv ? inv.id : undefined };
+    const r = id ? await api('PUT', '/documents/' + id, body) : await api('POST', '/documents', body);
+    toast(id ? 'Document enregistré' : `${S.me.doc_types[type].label} ${r.number} créé`);
+    location.hash = inv ? '#/factures/' + inv.id : '#/doc/' + (id || r.id);
+  }); };
+}
+
+async function pageDoc(id) {
+  loading('#/factures');
+  const d = await api('GET', '/documents/' + id);
+  const K = S.me.doc_types[d.type];
+  const locked = d.status === 'converti' || d.status === 'impute';
+  shell('#/factures', `<a class="back" href="#/docs/${d.type}">‹ ${DOC_PLURAL[d.type]}</a>
+    <div class="head"><h1>${esc(K.label)} ${esc(d.number)}</h1>${docTag(d)}</div>
+    <p class="sub" style="margin-top:-8px"><a href="#/clients/${d.client_id}">${esc(d.client_name)}</a> · ${fdate(d.issue_date)}${d.valid_until ? ` · ${d.type === 'devis' ? 'valable jusqu\'au' : 'livraison prévue le'} ${fdate(d.valid_until)}` : ''}</p>
+    ${d.invoice_id ? `<div class="banner info">${d.type === 'avoir' ? 'Déduit de la facture' : 'Facturé :'} <a href="#/factures/${d.invoice_id}">${esc(d.invoice_number)}</a></div>` : ''}
+    <div class="ledger"><div><div class="k">Total HT</div><div class="v">${amt(d.total_ht, false)}</div></div><div><div class="k">Total TTC</div><div class="v">${amt(d.total_ttc, false)}</div></div></div>
+    <div class="row-actions" style="margin-top:14px">
+      ${d.type !== 'avoir' && !locked ? '<button class="btn primary" id="conv">Transformer en facture</button>' : ''}
+      <button class="btn" id="print-btn">Imprimer / PDF</button>
+      ${!locked ? `<a class="btn" href="#/doc/${d.id}/modifier">Modifier</a>` : ''}
+      ${d.type === 'devis' && !locked ? `<button class="btn small" data-st="accepte">Marquer accepté</button><button class="btn small" data-st="refuse">Marquer refusé</button>` : ''}
+    </div>
+    ${d.client?.phone && d.type === 'devis' ? `<div class="row-actions"><a class="btn small wa" target="_blank" rel="noopener" href="https://wa.me/${phoneIntl(d.client.phone)}?text=${encodeURIComponent(`Bonjour, voici notre devis ${d.number} d'un montant de ${plain(d.total_ttc)}. N'hésitez pas à nous contacter pour toute question. Cordialement, ${S.me.company.name}`)}">Envoyer par WhatsApp</a></div>` : ''}
+    <h2>Lignes</h2>
+    <div class="list">${d.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}</div>
+    ${d.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(d.notes)}</div>` : ''}
+    <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer</button></div>`);
+  document.getElementById('print-btn').onclick = () => printInvoice(d, d.type);
+  const conv = document.getElementById('conv');
+  if (conv) conv.onclick = () => guard(conv, async () => { const r = await api('POST', `/documents/${id}/convert`); toast(`Facture ${r.number} créée`); location.hash = '#/factures/' + r.id; });
+  document.querySelectorAll('[data-st]').forEach(b => b.onclick = () => guard(b, async () => { await api('POST', `/documents/${id}/status`, { status: b.dataset.st }); toast('Statut mis à jour'); pageDoc(id); }));
+  document.getElementById('del').onclick = async e => {
+    if (!await confirmBox(`Supprimer ${K.label.toLowerCase()} ${d.number} ?${d.type === 'avoir' && d.invoice_id ? ' La facture retrouvera son solde.' : ''}`)) return;
+    guard(e.target, async () => { await api('DELETE', '/documents/' + id); toast('Document supprimé'); location.hash = '#/docs/' + d.type; });
+  };
+}
+
+// ---------- articles ----------
+async function pageProducts() {
+  loading('#/factures');
+  const rows = await api('GET', '/products');
+  shell('#/factures', `${salesTabs('#/articles')}<div class="head"><h1>Articles</h1><button class="btn primary" id="new">Ajouter un article</button></div>
+    <p class="sub" style="margin-top:-6px">Vos produits et services : dans une facture ou un devis, tapez le début du nom pour remplir le prix et la TVA.</p>
+    ${rows.length ? '<input class="search" type="search" id="q" placeholder="Rechercher un article" aria-label="Rechercher">' : ''}
+    <div id="lst"></div>`);
+  const form = (p = {}) => `<h2>${p.id ? 'Modifier l\'article' : 'Nouvel article'}</h2><form novalidate>
+    <label>Désignation<input name="name" value="${esc(p.name)}" required></label>
+    <div class="grid2"><label>Référence<input name="ref" value="${esc(p.ref)}"></label><label>Unité<input name="unit" value="${esc(p.unit)}" placeholder="pièce, heure, kg…"></label>
+    <label>Prix unitaire HT (DT)<input name="unit_price" type="number" inputmode="decimal" step="0.001" min="0" value="${esc(p.unit_price ?? '')}"></label>
+    <label>TVA<select name="tva">${S.me.tva_rates.map(r => `<option value="${r}" ${Number(p.tva ?? 19) === r ? 'selected' : ''}>${r} %</option>`).join('')}</select></label></div>
+    <div class="row-actions"><button class="btn primary" type="submit">Enregistrer l'article</button><button type="button" class="btn" data-close>Annuler</button>${p.id ? '<button type="button" class="btn danger" id="pdel">Supprimer</button>' : ''}</div></form>`;
+  const open = p => modal(form(p), (m, close) => {
+    const f = m.querySelector('form');
+    f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { p.id ? await api('PUT', '/products/' + p.id, formData(f)) : await api('POST', '/products', formData(f)); close(); toast('Article enregistré'); pageProducts(); }); };
+    const del = m.querySelector('#pdel'); if (del) del.onclick = () => guard(del, async () => { await api('DELETE', '/products/' + p.id); close(); toast('Article supprimé'); pageProducts(); });
+  });
+  const draw = () => {
+    const q = (document.getElementById('q')?.value || '').toLowerCase();
+    const f = rows.filter(p => !q || (p.name + ' ' + (p.ref || '')).toLowerCase().includes(q));
+    document.getElementById('lst').innerHTML = !rows.length ? '<div class="list"><div class="empty">Aucun article. Ajoutez vos produits ou services les plus vendus pour facturer plus vite.</div></div>'
+      : `<div class="list">${f.map(p => `<button type="button" class="item" data-p="${p.id}" style="width:100%;border:0;border-bottom:1px solid var(--line);background:none;text-align:left;cursor:pointer"><div class="main"><div class="t">${esc(p.name)}</div><div class="m">${esc([p.ref, p.unit, 'TVA ' + p.tva + ' %'].filter(Boolean).join(' · '))}</div></div><div class="r">${amt(p.unit_price)}<div class="sub">HT</div></div></button>`).join('') || '<div class="empty">Aucun résultat.</div>'}</div>`;
+    document.querySelectorAll('[data-p]').forEach(b => b.onclick = () => open(rows.find(p => p.id === Number(b.dataset.p))));
+  };
+  draw(); const q = document.getElementById('q'); if (q) q.oninput = draw;
+  document.getElementById('new').onclick = () => open({});
 }
 
 // ---------- paiements ----------
@@ -540,16 +701,16 @@ async function pageSettings() {
   S.me = await api('GET', '/me');
   const me = S.me, c = me.company, sub = me.subscription, owner = me.user.role === 'owner';
   const users = await api('GET', '/users');
-  const stateText = { trial: `Essai gratuit jusqu'au ${fdate(sub.ends)}`, active: `Actif jusqu'au ${fdate(sub.ends)}`, expired: `Expiré depuis le ${fdate(sub.ends)}`, suspended: 'Suspendu' }[sub.state];
+  const stateText = { trial: `Essai Pro jusqu'au ${fdate(sub.ends)}`, active: `Actif jusqu'au ${fdate(sub.ends)}`, free: `${me.invoices_this_month} / ${sub.free_limit} factures utilisées ce mois`, suspended: 'Suspendu' }[sub.state];
   shell('#/parametres', `<h1>Compte</h1>
     ${me.user.is_superadmin ? '<div class="banner info"><span>Vous êtes <b>administrateur de la plateforme</b> : vous gérez les abonnements de toutes les entreprises inscrites.</span><a class="btn small primary" href="#/admin">Gérer les abonnés</a></div>' : ''}
     <h2 style="margin-top:0">Abonnement</h2>
     <div class="panel">
-      <dl class="kv"><dt>Formule</dt><dd>${esc(sub.plan_label)} · ${sub.price.toLocaleString('fr-FR')} DT par ${sub.period}</dd><dt>État</dt><dd>${stateText}</dd></dl>
-      <div class="plans" style="max-width:none;margin-top:14px">${Object.entries(me.plans).map(([k, p]) => `<div style="border-color:var(--line)${k === sub.plan ? ';outline:2px solid var(--door)' : ''}"><b>${p.label}${k === sub.plan ? ' · votre formule' : ''}</b><span class="p" style="font-size:20px">${p.price.toLocaleString('fr-FR')} DT</span> par ${p.period}<br><span class="sub">${k === 'annuel' ? `soit ${(p.price / 12).toFixed(0)} DT par mois, 100 DT d'économie` : 'sans engagement'}</span></div>`).join('')}</div>
+      <dl class="kv"><dt>Formule</dt><dd>${esc(sub.plan_label)}${sub.price ? ` · ${sub.price.toLocaleString('fr-FR')} DT par ${sub.period}` : ''}</dd><dt>État</dt><dd>${stateText}</dd></dl>
+      <div class="plans" style="max-width:none;margin-top:14px">${Object.entries(me.plans).map(([k, p]) => `<div style="border-color:var(--line)${k === sub.plan ? ';outline:2px solid var(--door)' : ''}"><b>${p.label}${k === sub.plan ? ' · votre formule' : ''}</b><span class="p" style="font-size:20px">${p.price.toLocaleString('fr-FR')} DT</span> par ${p.period}<br><span class="sub">${k === 'annuel' ? `2 mois offerts, soit ${(p.price / 12).toFixed(2).replace('.', ',')} DT par mois` : 'sans engagement, factures illimitées'}</span></div>`).join('')}</div>
       ${me.payment.rib ? `<h2 style="margin-top:18px">Payer par virement ou versement</h2>
       <dl class="kv">${me.payment.holder ? `<dt>Titulaire</dt><dd>${esc(me.payment.holder)}</dd>` : ''}${me.payment.bank ? `<dt>Banque</dt><dd>${esc(me.payment.bank)}</dd>` : ''}<dt>RIB</dt><dd class="num" style="font-weight:500;word-break:break-all">${esc(me.payment.rib)}</dd>
-        <dt>Motif</dt><dd>Dafter ${esc(c.name)}</dd><dt>Montant</dt><dd>175 DT (1 mois) ou 2 000 DT (1 an)</dd></dl>
+        <dt>Motif</dt><dd>Dafter ${esc(c.name)}</dd><dt>Montant</dt><dd>40 DT (1 mois) ou 400 DT (1 an)</dd></dl>
       <div class="row-actions"><button class="btn small" id="copyrib">Copier le RIB</button></div>
       <p style="margin-bottom:0" class="sub">À la réception du paiement, l'abonnement sera activé.${me.payment.contact ? ` Pour accélérer, envoyez le reçu à <b>${esc(me.payment.contact)}</b>.` : ''}</p>` : `<p style="margin-bottom:0">${me.payment_info ? esc(me.payment_info) : 'Paiement par virement ou versement. À la réception du paiement, l\'abonnement sera activé.'}</p>`}
     </div>
@@ -606,18 +767,18 @@ async function pageAdmin() {
   loading('#/admin');
   const rows = await api('GET', '/admin/companies');
   const mrr = rows.filter(r => r.sub.state === 'active').reduce((s, r) => s + ((S.me.plans[r.plan]?.price || 0) / (S.me.plans[r.plan]?.months || 1)), 0);
-  const label = { trial: 'essai', active: 'actif', expired: 'expiré', suspended: 'suspendu' };
-  const cls = { trial: 'attente', active: 'payee', expired: 'retard', suspended: 'retard' };
+  const label = { trial: 'essai', active: 'Pro', free: 'gratuit', suspended: 'suspendu' };
+  const cls = { trial: 'attente', active: 'payee', free: 'partielle', suspended: 'retard' };
   shell('#/admin', `<h1>Abonnés</h1>
     <div class="ledger"><div><div class="k">Entreprises</div><div class="v">${rows.length}</div></div><div><div class="k">Abonnés actifs</div><div class="v">${rows.filter(r => r.sub.state === 'active').length}</div></div>
-      <div><div class="k">En essai</div><div class="v">${rows.filter(r => r.sub.state === 'trial').length}</div></div><div><div class="k">Revenu mensuel moyen</div><div class="v">${amt(mrr, false)}</div></div></div>
+      <div><div class="k">En essai / gratuits</div><div class="v">${rows.filter(r => r.sub.state === 'trial').length} / ${rows.filter(r => r.sub.state === 'free').length}</div></div><div><div class="k">Revenu mensuel moyen</div><div class="v">${amt(mrr, false)}</div></div></div>
     <h2>Entreprises inscrites</h2>
     <div class="list">${rows.map(r => `<div class="item"><div class="main"><div class="t">${esc(r.name)} <span class="tag ${cls[r.sub.state]}">${label[r.sub.state]}</span></div>
-      <div class="m">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''} · ${S.me.plans[r.plan]?.label} · jusqu'au ${fdate(r.sub.ends)}</div>
+      <div class="m">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''} · ${r.sub.plan_label}${r.sub.state === 'free' ? '' : ` · jusqu'au ${fdate(r.sub.ends)}`}</div>
       <div class="m">${r.users} util. · ${r.clients} clients · ${r.invoices} factures · inscrit le ${fdate(r.created_at)}</div>
       <div class="row-actions">
-        <button class="btn small primary" data-a="add_months" data-v="1" data-id="${r.id}">175 DT reçus : +1 mois</button>
-        <button class="btn small primary" data-a="add_months" data-v="12" data-id="${r.id}" data-plan="annuel">2 000 DT reçus : +12 mois</button>
+        <button class="btn small primary" data-a="add_months" data-v="1" data-id="${r.id}">40 DT reçus : +1 mois</button>
+        <button class="btn small primary" data-a="add_months" data-v="12" data-id="${r.id}" data-plan="annuel">400 DT reçus : +12 mois</button>
         <button class="btn small" data-a="extend_trial" data-v="14" data-id="${r.id}">Essai +14 j</button>
         <button class="btn small" data-a="plan" data-v="${r.plan === 'annuel' ? 'mensuel' : 'annuel'}" data-id="${r.id}">Passer en ${r.plan === 'annuel' ? 'Mensuel' : 'Annuel'}</button>
         ${r.id !== S.me.company.id ? `<button class="btn small danger" data-delco="${r.id}" data-name="${esc(r.name)}">Supprimer</button>` : ''}
@@ -657,6 +818,11 @@ async function router() {
     if (h === '#/factures/nouvelle') return await pageInvoiceEdit();
     if ((m = h.match(/^#\/factures\/(\d+)\/modifier$/))) return await pageInvoiceEdit(m[1]);
     if ((m = h.match(/^#\/factures\/(\d+)$/))) return await pageInvoice(m[1]);
+    if ((m = h.match(/^#\/docs\/(devis|commande|livraison|avoir)$/))) return await pageDocs(m[1]);
+    if ((m = h.match(/^#\/docs\/(devis|commande|livraison|avoir)\/nouveau$/))) return await pageDocEdit(m[1]);
+    if ((m = h.match(/^#\/doc\/(\d+)\/modifier$/))) return await pageDocEdit(null, m[1]);
+    if ((m = h.match(/^#\/doc\/(\d+)$/))) return await pageDoc(m[1]);
+    if (h === '#/articles') return await pageProducts();
     if (h === '#/paiements') return await pagePayments();
     if (h === '#/alertes') return await pageAlerts();
     if (h === '#/parametres') return await pageSettings();

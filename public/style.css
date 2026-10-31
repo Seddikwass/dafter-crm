@@ -215,3 +215,7 @@ a.item:hover { background: #fafbfd; }
 .inv-tot .g { font-weight: 700; border-top: 1.5px solid #000; padding-top: 6px; font-size: 14px; }
 .inv-words { margin-top: 18px; font-style: italic; }
 .inv-foot { margin-top: 40px; font-size: 11px; color: #444; border-top: 1px solid #ccc; padding-top: 8px; }
+
+.tabs.seg { margin: -4px 0 14px; }
+.tabs.seg a { border: 1px solid var(--line); background: var(--paper); border-radius: 20px; padding: 5px 12px; white-space: nowrap; font-size: 13.5px; color: var(--ink); }
+.tabs.seg a.on { background: var(--ink); color: #fff; border-color: var(--ink); }

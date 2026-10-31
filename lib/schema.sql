@@ -76,3 +76,38 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 CREATE INDEX IF NOT EXISTS payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS payments_company ON payments(company_id, paid_on);
+
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS doc_seq JSONB NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS products (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  ref TEXT,
+  name TEXT NOT NULL,
+  unit TEXT,
+  unit_price NUMERIC(14,3) NOT NULL DEFAULT 0,
+  tva INT NOT NULL DEFAULT 19,
+  description TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS products_company ON products(company_id);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  client_id INT NOT NULL REFERENCES clients(id) ON DELETE RESTRICT,
+  type TEXT NOT NULL,
+  number TEXT NOT NULL,
+  issue_date DATE NOT NULL,
+  valid_until DATE,
+  items JSONB NOT NULL DEFAULT '[]',
+  total_ht NUMERIC(14,3) NOT NULL DEFAULT 0,
+  total_tva NUMERIC(14,3) NOT NULL DEFAULT 0,
+  total_ttc NUMERIC(14,3) NOT NULL DEFAULT 0,
+  notes TEXT,
+  status TEXT NOT NULL DEFAULT 'emis',
+  invoice_id INT REFERENCES invoices(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (company_id, type, number)
+);
+CREATE INDEX IF NOT EXISTS documents_company ON documents(company_id, type, issue_date);

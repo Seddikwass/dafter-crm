@@ -13,8 +13,15 @@ if (!process.env.DATABASE_URL) { console.error('DATABASE_URL manquant'); process
 const db = new Pool(process.env.DATABASE_URL, Number(process.env.DB_POOL || 5));
 
 const PLANS = {
-  mensuel: { label: 'Mensuel', price: 175, period: 'mois', months: 1, maxUsers: 10, maxClients: 100000 },
-  annuel: { label: 'Annuel', price: 2000, period: 'an', months: 12, maxUsers: 10, maxClients: 100000 },
+  mensuel: { label: 'Pro mensuel', price: 40, period: 'mois', months: 1, maxUsers: 10, maxClients: 100000 },
+  annuel: { label: 'Pro annuel', price: 400, period: 'an', months: 12, maxUsers: 10, maxClients: 100000 },
+};
+const FREE = { label: 'Gratuit', maxInvoicesPerMonth: 20, maxUsers: 1 };
+const DOC_TYPES = {
+  devis: { label: 'Devis', prefix: 'DV' },
+  commande: { label: 'Bon de commande', prefix: 'BC' },
+  livraison: { label: 'Bon de livraison', prefix: 'BL' },
+  avoir: { label: 'Avoir', prefix: 'AV' },
 };
 const METHODS = ['espèces', 'chèque', 'virement', 'traite', 'carte', 'D17'];
 const TVA_RATES = [0, 7, 13, 19];
@@ -74,13 +81,15 @@ function subscription(c) {
   const t = today();
   const paidOk = c.paid_until && c.paid_until >= t;
   const trialOk = c.trial_ends >= t;
-  let state = 'expired';
+  let state = 'free';
   if (c.status === 'suspended') state = 'suspended';
   else if (paidOk) state = 'active';
   else if (trialOk) state = 'trial';
   const end = paidOk ? c.paid_until : c.trial_ends;
   const daysLeft = Math.round((Date.parse(end) - Date.parse(t)) / 864e5);
-  return { state, plan: c.plan, plan_label: PLANS[c.plan]?.label || c.plan, price: PLANS[c.plan]?.price, period: PLANS[c.plan]?.period, ends: end, days_left: daysLeft, can_write: state === 'active' || state === 'trial' };
+  const plan = state === 'free' ? FREE : PLANS[c.plan];
+  return { state, plan: state === 'free' ? 'gratuit' : c.plan, plan_label: plan?.label || c.plan, price: state === 'free' ? 0 : plan?.price, period: plan?.period || 'mois', ends: end, days_left: daysLeft,
+    can_write: state !== 'suspended', free_limit: FREE.maxInvoicesPerMonth, paid_plan: c.plan };
 }
 
 // ---------- routeur ----------
@@ -141,7 +150,7 @@ route('GET', '/api/me', async (req) => {
   return {
     user: { id: u.id, name: u.name, email: u.email, role: u.role, is_superadmin: u.is_superadmin },
     company: { id: c.id, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer },
-    subscription: subscription(c), plans: PLANS, methods: METHODS, tva_rates: TVA_RATES, today: today(),
+    subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
     payment: { rib: process.env.PAYMENT_RIB || '', holder: process.env.PAYMENT_HOLDER || '', bank: process.env.PAYMENT_BANK || '', contact: process.env.PAYMENT_CONTACT || '' },
   };
@@ -169,7 +178,7 @@ route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, r
   const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [cid]);
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
-    for (const tbl of ['payments', 'invoices', 'clients', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
+    for (const tbl of ['payments', 'documents', 'invoices', 'products', 'clients', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
     await t.query('DELETE FROM companies WHERE id = $1', [cid]);
   });
   setSession(req, res, '', 0);
@@ -186,8 +195,8 @@ route('POST', '/api/users', { owner: true }, async (req, res, b) => {
   if (!name || !isEmail(email)) throw bad('Nom et e-mail valides obligatoires');
   if (!b.password || String(b.password).length < 8) throw bad('Mot de passe de 8 caractères minimum');
   const n = await db.query('SELECT count(*)::int n FROM users WHERE company_id = $1', [req.user.company_id]);
-  const max = PLANS[req.user.plan]?.maxUsers || 10;
-  if (n.rows[0].n >= max) throw bad(`Votre formule permet ${max} utilisateurs maximum`);
+  const max = subscription(req.user).state === 'free' ? FREE.maxUsers : (PLANS[req.user.plan]?.maxUsers || 10);
+  if (n.rows[0].n >= max) throw bad(max === 1 ? 'La formule gratuite est limitée à 1 utilisateur. Passez à Pro pour ajouter votre équipe.' : `Votre formule permet ${max} utilisateurs maximum`);
   const ex = await db.query('SELECT 1 FROM users WHERE email = $1', [email]);
   if (ex.rows.length) throw bad('Cet e-mail est déjà utilisé');
   await db.query(`INSERT INTO users (company_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,'member')`, [req.user.company_id, name, email, hashPassword(String(b.password))]);
@@ -253,15 +262,35 @@ route('PUT', '/api/clients/:id', async (req, res, b, p) => {
   return { ok: true };
 });
 route('DELETE', '/api/clients/:id', async (req, res, b, p) => {
-  const inv = await db.query('SELECT count(*)::int n FROM invoices WHERE client_id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  const inv = await db.query('SELECT (SELECT count(*) FROM invoices WHERE client_id = $1 AND company_id = $2)::int n, (SELECT count(*) FROM documents WHERE client_id = $1 AND company_id = $2)::int d', [p.id, req.user.company_id]);
   if (inv.rows[0].n) throw bad('Ce client a des factures : supprimez-les d\'abord.');
+  if (inv.rows[0].d) throw bad('Ce client a des devis ou des bons : supprimez-les d\'abord.');
   await db.query('DELETE FROM clients WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
   return { ok: true };
 });
 
 // ---------- factures ----------
+async function invoicesThisMonth(cid) {
+  const { rows } = await db.query(`SELECT count(*)::int n FROM invoices WHERE company_id = $1 AND date_trunc('month', created_at) = date_trunc('month', now())`, [cid]);
+  return rows[0].n;
+}
+async function insertInvoice(t, req, b, v) {
+  const cid = req.user.company_id;
+  if (!req.user.is_superadmin && subscription(req.user).state === 'free' && await invoicesThisMonth(cid) >= FREE.maxInvoicesPerMonth)
+    throw new HttpError(402, `La formule gratuite est limitée à ${FREE.maxInvoicesPerMonth} factures par mois. Passez à Pro (40 DT par mois) pour facturer sans limite.`);
+  const year = Number(b.issue_date.slice(0, 4));
+  const seq = await t.query(`UPDATE companies SET invoice_seq = CASE WHEN invoice_seq_year = $2 THEN invoice_seq + 1 ELSE 1 END, invoice_seq_year = $2 WHERE id = $1 RETURNING invoice_seq, invoice_prefix`, [cid, year]);
+  let number = str(b.number, 40);
+  if (!number) number = `${seq.rows[0].invoice_prefix}${year}-${String(seq.rows[0].invoice_seq).padStart(4, '0')}`;
+  const dup = await t.query('SELECT 1 FROM invoices WHERE company_id = $1 AND number = $2', [cid, number]);
+  if (dup.rows.length) throw bad(`Le numéro ${number} existe déjà`);
+  const { rows } = await t.query(`INSERT INTO invoices (company_id, client_id, number, issue_date, due_date, items, total_ht, total_tva, timbre, total_ttc, notes)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, number`,
+    [cid, b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000)]);
+  return rows[0];
+}
 function computeInvoice(b) {
-  if (!Array.isArray(b.items) || !b.items.length) throw bad('Ajoutez au moins une ligne à la facture');
+  if (!Array.isArray(b.items) || !b.items.length) throw bad('Ajoutez au moins une ligne');
   if (b.items.length > 200) throw bad('Trop de lignes');
   let ht = 0, tva = 0;
   const items = b.items.map(it => {
@@ -272,7 +301,11 @@ function computeInvoice(b) {
     if (!TVA_RATES.includes(rate)) throw bad('Taux de TVA invalide');
     const lineHt = r3(qty * price);
     ht += lineHt; tva += r3(lineHt * rate / 100);
-    return { designation, qty, unit_price: r3(price), tva: rate, total_ht: lineHt };
+    const line = { designation, qty, unit_price: r3(price), tva: rate, total_ht: lineHt };
+    if (it.product_id) line.product_id = Number(it.product_id) || undefined;
+    if (it.ref) line.ref = str(it.ref, 40);
+    if (it.unit) line.unit = str(it.unit, 20);
+    return line;
   });
   ht = r3(ht); tva = r3(tva);
   const timbre = b.timbre ? 1 : 0;
@@ -298,18 +331,7 @@ route('POST', '/api/invoices', async (req, res, b) => {
   if (!isDate(b.issue_date) || !isDate(b.due_date)) throw bad('Dates invalides');
   if (b.due_date < b.issue_date) throw bad('L\'échéance doit être après la date de facture');
   const v = computeInvoice(b);
-  return db.tx(async t => {
-    const year = Number(b.issue_date.slice(0, 4));
-    const seq = await t.query(`UPDATE companies SET invoice_seq = CASE WHEN invoice_seq_year = $2 THEN invoice_seq + 1 ELSE 1 END, invoice_seq_year = $2 WHERE id = $1 RETURNING invoice_seq, invoice_prefix`, [cid, year]);
-    let number = str(b.number, 40);
-    if (!number) number = `${seq.rows[0].invoice_prefix}${year}-${String(seq.rows[0].invoice_seq).padStart(4, '0')}`;
-    const dup = await t.query('SELECT 1 FROM invoices WHERE company_id = $1 AND number = $2', [cid, number]);
-    if (dup.rows.length) throw bad(`Le numéro ${number} existe déjà`);
-    const { rows } = await t.query(`INSERT INTO invoices (company_id, client_id, number, issue_date, due_date, items, total_ht, total_tva, timbre, total_ttc, notes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, number`,
-      [cid, b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000)]);
-    return rows[0];
-  });
+  return db.tx(t => insertInvoice(t, req, b, v));
 });
 route('PUT', '/api/invoices/:id', async (req, res, b, p) => {
   const cid = req.user.company_id;
@@ -331,6 +353,115 @@ route('PUT', '/api/invoices/:id', async (req, res, b, p) => {
 });
 route('DELETE', '/api/invoices/:id', async (req, res, b, p) => {
   await db.query('DELETE FROM invoices WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  return { ok: true };
+});
+
+// ---------- articles ----------
+function productFields(b) {
+  const name = str(b.name, 200); if (!name) throw bad('Désignation obligatoire');
+  const price = Number(b.unit_price); if (!(price >= 0)) throw bad('Prix invalide');
+  const rate = Number(b.tva); if (!TVA_RATES.includes(rate)) throw bad('Taux de TVA invalide');
+  return [str(b.ref, 40), name, str(b.unit, 20), r3(price), rate, str(b.description, 1000)];
+}
+route('GET', '/api/products', async (req) => {
+  const { rows } = await db.query('SELECT * FROM products WHERE company_id = $1 ORDER BY name', [req.user.company_id]);
+  return rows;
+});
+route('POST', '/api/products', async (req, res, b) => {
+  const { rows } = await db.query('INSERT INTO products (company_id, ref, name, unit, unit_price, tva, description) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id', [req.user.company_id, ...productFields(b)]);
+  return rows[0];
+});
+route('PUT', '/api/products/:id', async (req, res, b, p) => {
+  const r = await db.query('UPDATE products SET ref=$1, name=$2, unit=$3, unit_price=$4, tva=$5, description=$6 WHERE id=$7 AND company_id=$8', [...productFields(b), p.id, req.user.company_id]);
+  if (!r.rowCount) throw new HttpError(404, 'Article introuvable');
+  return { ok: true };
+});
+route('DELETE', '/api/products/:id', async (req, res, b, p) => {
+  await db.query('DELETE FROM products WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  return { ok: true };
+});
+
+// ---------- devis, bons, avoirs ----------
+const DOC_SELECT = `SELECT d.*, cl.name AS client_name, i.number AS invoice_number FROM documents d JOIN clients cl ON cl.id = d.client_id LEFT JOIN invoices i ON i.id = d.invoice_id`;
+function docType(t) { if (!DOC_TYPES[t]) throw bad('Type de document inconnu'); return t; }
+async function docData(req, b) {
+  const cl = await db.query('SELECT id FROM clients WHERE id = $1 AND company_id = $2', [b.client_id, req.user.company_id]);
+  if (!cl.rows[0]) throw bad('Choisissez un client');
+  if (!isDate(b.issue_date)) throw bad('Date invalide');
+  if (b.valid_until && !isDate(b.valid_until)) throw bad('Date de validité invalide');
+  return computeInvoice({ ...b, timbre: false });
+}
+route('GET', '/api/documents', async (req) => {
+  const { rows } = await db.query(`${DOC_SELECT} WHERE d.company_id = $1 ORDER BY d.issue_date DESC, d.id DESC`, [req.user.company_id]);
+  return rows;
+});
+route('GET', '/api/documents/:id', async (req, res, b, p) => {
+  const { rows } = await db.query(`${DOC_SELECT} WHERE d.company_id = $1 AND d.id = $2`, [req.user.company_id, p.id]);
+  if (!rows[0]) throw new HttpError(404, 'Document introuvable');
+  const client = await db.query('SELECT * FROM clients WHERE id = $1', [rows[0].client_id]);
+  return { ...rows[0], client: client.rows[0] };
+});
+route('POST', '/api/documents', async (req, res, b) => {
+  const cid = req.user.company_id, type = docType(b.type);
+  const v = await docData(req, b);
+  let inv = null;
+  if (type === 'avoir' && b.invoice_id) {
+    const r = await db.query(`${INVOICE_SELECT} WHERE i.company_id = $1 AND i.id = $2`, [cid, b.invoice_id]);
+    inv = r.rows[0]; if (!inv) throw bad('Facture introuvable');
+    if (inv.client_id !== Number(b.client_id)) throw bad('L\'avoir doit concerner le client de la facture');
+    if (v.ttc > r3(inv.balance) + 0.0005) throw bad(`L'avoir dépasse le reste à payer de la facture (${r3(inv.balance).toFixed(3)} DT)`);
+  }
+  return db.tx(async t => {
+    const year = Number(b.issue_date.slice(0, 4)), key = `${type}-${year}`;
+    const seq = await t.query(`UPDATE companies SET doc_seq = jsonb_set(doc_seq, ARRAY[$2::text], to_jsonb(COALESCE((doc_seq->>$2)::int, 0) + 1)) WHERE id = $1 RETURNING (doc_seq->>$2)::int n`, [cid, key]);
+    const number = `${DOC_TYPES[type].prefix}${year}-${String(seq.rows[0].n).padStart(4, '0')}`;
+    const { rows } = await t.query(`INSERT INTO documents (company_id, client_id, type, number, issue_date, valid_until, items, total_ht, total_tva, total_ttc, notes, status, invoice_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, number`,
+      [cid, b.client_id, type, number, b.issue_date, b.valid_until || null, v.items, v.ht, v.tva, v.ttc, str(b.notes, 2000), type === 'avoir' && inv ? 'impute' : 'emis', inv ? inv.id : null]);
+    if (inv) await t.query(`INSERT INTO payments (company_id, invoice_id, amount, paid_on, method, reference, created_by) VALUES ($1,$2,$3,$4,'avoir',$5,$6)`, [cid, inv.id, v.ttc, b.issue_date, number, req.user.id]);
+    return rows[0];
+  });
+});
+route('PUT', '/api/documents/:id', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  const cur = await db.query('SELECT type, status FROM documents WHERE id = $1 AND company_id = $2', [p.id, cid]);
+  if (!cur.rows[0]) throw new HttpError(404, 'Document introuvable');
+  if (cur.rows[0].status === 'converti' || cur.rows[0].status === 'impute') throw bad('Ce document a déjà été transformé : il ne peut plus être modifié');
+  const v = await docData(req, b);
+  await db.query(`UPDATE documents SET client_id=$1, issue_date=$2, valid_until=$3, items=$4, total_ht=$5, total_tva=$6, total_ttc=$7, notes=$8 WHERE id=$9 AND company_id=$10`,
+    [b.client_id, b.issue_date, b.valid_until || null, v.items, v.ht, v.tva, v.ttc, str(b.notes, 2000), p.id, cid]);
+  return { ok: true };
+});
+route('POST', '/api/documents/:id/status', async (req, res, b, p) => {
+  if (!['emis', 'accepte', 'refuse'].includes(b.status)) throw bad('Statut invalide');
+  const r = await db.query(`UPDATE documents SET status = $1 WHERE id = $2 AND company_id = $3 AND status NOT IN ('converti','impute')`, [b.status, p.id, req.user.company_id]);
+  if (!r.rowCount) throw bad('Statut non modifiable');
+  return { ok: true };
+});
+route('POST', '/api/documents/:id/convert', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  const { rows } = await db.query('SELECT * FROM documents WHERE id = $1 AND company_id = $2', [p.id, cid]);
+  const d = rows[0]; if (!d) throw new HttpError(404, 'Document introuvable');
+  if (d.type === 'avoir') throw bad('Un avoir ne se transforme pas en facture');
+  if (d.status === 'converti') throw bad('Ce document a déjà été facturé');
+  const co = await db.query('SELECT default_due_days FROM companies WHERE id = $1', [cid]);
+  const issue = today();
+  const data = { client_id: d.client_id, issue_date: issue, due_date: addDays(issue, co.rows[0].default_due_days), items: d.items, timbre: true,
+    notes: [`Selon ${DOC_TYPES[d.type].label.toLowerCase()} ${d.number}`, d.notes].filter(Boolean).join('\n') };
+  const v = computeInvoice(data);
+  return db.tx(async t => {
+    const inv = await insertInvoice(t, req, data, v);
+    await t.query(`UPDATE documents SET status = 'converti', invoice_id = $1 WHERE id = $2`, [inv.id, d.id]);
+    return inv;
+  });
+});
+route('DELETE', '/api/documents/:id', async (req, res, b, p) => {
+  const cid = req.user.company_id;
+  await db.tx(async t => {
+    const { rows } = await t.query('SELECT type, number, invoice_id FROM documents WHERE id = $1 AND company_id = $2', [p.id, cid]);
+    if (rows[0]?.type === 'avoir' && rows[0].invoice_id) await t.query(`DELETE FROM payments WHERE company_id = $1 AND invoice_id = $2 AND method = 'avoir' AND reference = $3`, [cid, rows[0].invoice_id, rows[0].number]);
+    await t.query('DELETE FROM documents WHERE id = $1 AND company_id = $2', [p.id, cid]);
+  });
   return { ok: true };
 });
 
@@ -431,7 +562,9 @@ route('DELETE', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
     await t.query('DELETE FROM payments WHERE company_id = $1', [p.id]);
+    await t.query('DELETE FROM documents WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM invoices WHERE company_id = $1', [p.id]);
+    await t.query('DELETE FROM products WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM clients WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM users WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM companies WHERE id = $1', [p.id]);
