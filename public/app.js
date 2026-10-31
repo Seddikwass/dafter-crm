@@ -522,6 +522,7 @@ async function pageInvoice(id) {
   bindReminderRecord(root, () => ({ invoice_id: inv.id, step: currentStep(inv.days_overdue), message: 'Relance facture ' + inv.number }), () => pageInvoice(id));
   document.querySelectorAll('[data-delrem]').forEach(b => b.onclick = () => guard(b, async () => { await api('DELETE', '/reminders/' + b.dataset.delrem); pageInvoice(id); }));
   document.getElementById('print-btn').onclick = () => printInvoice(inv);
+  if (wantsPrint()) printInvoice(inv);
   document.getElementById('del').onclick = async e => {
     if (!await confirmBox(`Supprimer la facture ${inv.number} et ses paiements ?`)) return;
     guard(e.target, async () => { await api('DELETE', '/invoices/' + id); toast('Facture supprimée'); location.hash = '#/factures'; });
@@ -590,7 +591,12 @@ async function printInvoice(inv, kind, opts = {}) {
   const legal = [co.name + (co.legal_form ? ' ' + co.legal_form : ''), co.capital ? 'au capital de ' + co.capital : '', [co.address, [co.postal_code, co.city].filter(Boolean).join(' ')].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
   const contact = [co.phone ? 'Tél. : ' + co.phone : '', co.fax ? 'Fax : ' + co.fax : '', co.email ? 'E-mail : ' + co.email : ''].filter(Boolean).join(' · ');
   const ids = [co.matricule_fiscal ? 'MF : ' + co.matricule_fiscal : '', co.rc ? 'RC : ' + co.rc : ''].filter(Boolean).join(' · ');
-  document.getElementById('print').innerHTML = `<div class="pv">
+  document.getElementById('print').innerHTML = `<div class="pv-bar">
+      <button type="button" class="btn" id="pv-close">‹ Fermer</button>
+      <button type="button" class="btn primary" id="pv-print">Imprimer / Enregistrer en PDF</button>
+      ${standalone() ? '<button type="button" class="btn" id="pv-open">Ouvrir dans Chrome</button>' : ''}
+      <p class="pv-hint">Sur téléphone, choisissez « Enregistrer au format PDF » comme imprimante pour obtenir le PDF à envoyer.</p>
+    </div><div class="pv-page"><div class="pv">
     <div class="pv-logo">${S.logo ? `<img src="${S.logo}" alt="">` : `<div class="pv-coname">${esc(co.name)}</div>`}</div>
     <div class="pv-client"><div class="pv-code">${code}</div><b>${esc(c.legal_name || c.name || '')}</b>${c.legal_name && c.legal_name !== c.name ? `<div>${esc(c.name)}</div>` : ''}
       ${c.address ? `<div>${esc(c.address)}</div>` : ''}${c.postal_code || c.city ? `<div>${esc([c.postal_code, (c.city || '').toUpperCase()].filter(Boolean).join(' - '))}</div>` : ''}
@@ -616,12 +622,25 @@ async function printInvoice(inv, kind, opts = {}) {
       </div>
     </div>`}
     <div class="pv-foot">${co.slogan ? `<div class="pv-slogan">${esc(co.slogan)}</div>` : ''}<div>${esc(legal)}</div>${contact ? `<div>${esc(contact)}</div>` : ''}${ids ? `<div>${esc(ids)}</div>` : ''}${co.invoice_footer ? `<div>${esc(co.invoice_footer)}</div>` : ''}</div>
-  </div>`;
-  const title = document.title; document.title = `${label} ${inv.number}`;
-  const img = document.querySelector('#print img');
-  const go = () => { window.print(); setTimeout(() => { document.title = title; }, 500); };
-  if (img && !img.complete) { img.onload = go; img.onerror = go; } else go();
+  </div></div>`;
+  // Aperçu plein écran : l'impression part d'un geste direct sur le bouton, ce qu'exigent les navigateurs mobiles.
+  const pr = document.getElementById('print'), page = pr.querySelector('.pv-page');
+  const title = document.title;
+  const fit = () => { page.style.zoom = Math.min(1, (window.innerWidth - 16) / 794); };
+  fit(); window.addEventListener('resize', fit);
+  document.body.classList.add('previewing'); window.scrollTo(0, 0);
+  const close = () => { document.body.classList.remove('previewing'); pr.innerHTML = ''; document.title = title; window.removeEventListener('resize', fit); };
+  document.getElementById('pv-close').onclick = close;
+  document.getElementById('pv-print').onclick = () => {
+    document.title = `${label} ${inv.number}`;
+    try { window.print(); } catch (_) { toast('Impression impossible ici : ouvrez Dafter dans Chrome', true); }
+    setTimeout(() => { document.title = title; }, 1000);
+  };
+  const op = document.getElementById('pv-open');
+  if (op) op.onclick = () => { const h = location.hash.split('?')[0]; window.open(location.origin + '/' + h + '?imprimer=1', '_blank'); };
 }
+function standalone() { return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true; }
+function wantsPrint() { return new URLSearchParams(location.hash.split('?')[1] || '').get('imprimer') === '1'; }
 
 
 // ---------- devis, bons, avoirs ----------
@@ -706,6 +725,7 @@ async function pageDoc(id) {
     ${d.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(d.notes)}</div>` : ''}
     <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer</button></div>`);
   document.getElementById('print-btn').onclick = () => printInvoice(d, d.type);
+  if (wantsPrint()) printInvoice(d, d.type);
   const conv = document.getElementById('conv');
   if (conv) conv.onclick = () => guard(conv, async () => { const r = await api('POST', `/documents/${id}/convert`); toast(`Facture ${r.number} créée`); location.hash = '#/factures/' + r.id; });
   document.querySelectorAll('[data-st]').forEach(b => b.onclick = () => guard(b, async () => { await api('POST', `/documents/${id}/status`, { status: b.dataset.st }); toast('Statut mis à jour'); pageDoc(id); }));
@@ -863,7 +883,9 @@ async function pagePurchase(id) {
     ${d.type === 'facture' ? `<h2>Paiements faits</h2><div class="list">${d.payments.length ? d.payments.map(p => `<div class="item s-payee"><div class="main"><div class="t">${fdate(p.paid_on)} · ${esc(p.method)}</div><div class="m">${p.reference ? 'réf. ' + esc(p.reference) : 'sans référence'}</div></div><div class="r">${amt(p.amount)}<div><button class="btn small danger" data-delpay="${p.id}">Annuler</button></div></div></div>`).join('') : '<div class="empty">Aucun paiement fait pour cette facture.</div>'}</div>` : ''}
     ${d.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(d.notes)}</div>` : ''}
     <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer</button></div>`);
-  document.getElementById('print-btn').onclick = () => printInvoice(d, d.type, { label: K.label, party: d.supplier, qtyOnly: d.type === 'reception', sign1: 'Réceptionné par', sign2: 'Signature du livreur' });
+  const doPrint = () => printInvoice(d, d.type, { label: K.label, party: d.supplier, qtyOnly: d.type === 'reception', sign1: 'Réceptionné par', sign2: 'Signature du livreur' });
+  document.getElementById('print-btn').onclick = doPrint;
+  if (wantsPrint()) doPrint();
   document.querySelectorAll('[data-conv]').forEach(b => b.onclick = () => {
     if (b.dataset.conv === 'facture') return modal(`<h2>Facture du fournisseur</h2><form novalidate><label>N° de la facture du fournisseur<input name="supplier_ref"></label><div class="row-actions"><button class="btn primary" type="submit">Créer la facture d'achat</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
       const f = m.querySelector('form'); f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { const r = await api('POST', `/purchases/${id}/convert`, { to: 'facture', supplier_ref: f.elements.supplier_ref.value }); close(); toast(`Facture d'achat ${r.number} créée`); location.hash = '#/achat/' + r.id; }); };
@@ -1263,6 +1285,6 @@ async function router() {
     if (S.me) shell('', `<div class="banner err">${esc(e.message)}</div><a class="btn" href="#/">Retour à l'accueil</a>`);
   }
 }
-window.addEventListener('hashchange', router);
+window.addEventListener('hashchange', () => { if (document.body.classList.contains('previewing')) { document.body.classList.remove('previewing'); document.getElementById('print').innerHTML = ''; } router(); });
 router();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});

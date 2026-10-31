@@ -201,11 +201,19 @@ a.item:hover { background: #fafbfd; }
 
 /* ---- impression facture ---- */
 #print { display: none; }
+body.previewing { background: #5d6b82; }
+body.previewing .app { display: none; }
+body.previewing #print { display: block; padding: 0 8px 24px; }
+.pv-bar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0; background: #5d6b82; }
+.pv-bar .btn.primary { flex: 1; min-width: 200px; }
+.pv-hint { width: 100%; margin: 0; font-size: 12.5px; color: #eef2f8; }
+.pv-page { width: 794px; background: #fff; margin: 0 auto; padding: 40px 44px; box-shadow: 0 4px 18px rgba(0,0,0,.25); }
 @media print {
-  body { background: #fff; }
-  .app, .modal-bg, .toast { display: none !important; }
-  #print { display: block; color: #000; font-size: 12.5px; padding: 0; }
-  @page { margin: 16mm; }
+  body, body.previewing { background: #fff !important; }
+  .app, .modal-bg, .toast, .pv-bar { display: none !important; }
+  #print { display: block !important; color: #000; font-size: 12.5px; padding: 0 !important; }
+  .pv-page { zoom: 1 !important; width: auto !important; padding: 0 !important; margin: 0 !important; box-shadow: none !important; }
+  @page { margin: 14mm; }
 }
 .inv-head { display: flex; justify-content: space-between; gap: 20px; margin-bottom: 26px; }
 .inv-head h1 { font-size: 22px; margin: 0 0 4px; }
