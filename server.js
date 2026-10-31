@@ -163,6 +163,18 @@ route('PUT', '/api/company', { owner: true, readOnlyOk: true }, async (req, res,
   return { ok: true };
 });
 
+route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, res, b) => {
+  const cid = req.user.company_id;
+  const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [cid]);
+  if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
+  await db.tx(async t => {
+    for (const tbl of ['payments', 'invoices', 'clients', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
+    await t.query('DELETE FROM companies WHERE id = $1', [cid]);
+  });
+  setSession(req, res, '', 0);
+  return { ok: true };
+});
+
 // ---------- équipe ----------
 route('GET', '/api/users', async (req) => {
   const { rows } = await db.query('SELECT id, name, email, role, last_login FROM users WHERE company_id = $1 ORDER BY id', [req.user.company_id]);

@@ -570,12 +570,23 @@ async function pageSettings() {
     <h2>Sécurité</h2>
     <form id="pwf" class="panel" novalidate><div class="grid2"><label>Mot de passe actuel<input name="current" type="password" autocomplete="current-password"></label><label>Nouveau mot de passe<input name="next" type="password" minlength="8" autocomplete="new-password"></label></div><button class="btn" type="submit">Changer le mot de passe</button></form>
     <div class="row-actions" style="margin-top:20px">${me.user.is_superadmin ? '<a class="btn" href="#/admin">Gérer les abonnés</a>' : ''}<button class="btn" id="logout">Se déconnecter</button></div>
+    ${owner ? `<h2>Fermer le compte</h2><div class="panel"><p style="margin-top:0">Supprime définitivement votre entreprise, ses utilisateurs, clients, factures et paiements.</p><button class="btn danger" id="delco">Supprimer mon compte</button></div>` : ''}
     <p class="sign">Dafter · créé par Wassim Khalfalli</p>`);
   const cof = document.getElementById('cof');
   cof.onsubmit = e => { e.preventDefault(); guard(cof.querySelector('button'), async () => { await api('PUT', '/company', formData(cof)); S.me = await api('GET', '/me'); toast('Informations enregistrées'); document.querySelector('.topbar .co').textContent = S.me.company.name; }); };
   const pwf = document.getElementById('pwf');
   pwf.onsubmit = e => { e.preventDefault(); guard(pwf.querySelector('button'), async () => { await api('PUT', '/me/password', formData(pwf)); pwf.reset(); toast('Mot de passe changé'); }); };
   document.getElementById('logout').onclick = async () => { await api('POST', '/auth/logout'); S.me = null; location.hash = '#/connexion'; };
+  const dc = document.getElementById('delco');
+  if (dc) dc.onclick = () => modal(`<h2>Supprimer votre compte ?</h2><p>Votre entreprise ${esc(c.name)}, ses utilisateurs, clients, factures et paiements seront effacés définitivement.</p>
+    <form novalidate><label>Pour confirmer, tapez le nom de l'entreprise : <b>${esc(c.name)}</b><input name="confirm_name" autocomplete="off"></label>
+    <div class="row-actions"><button class="btn danger" type="submit">Supprimer définitivement</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form');
+    f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
+      await api('DELETE', '/company', { confirm_name: f.elements.confirm_name.value });
+      close(); S.me = null; toast('Compte supprimé'); location.hash = '#/inscription';
+    }); };
+  });
   const au = document.getElementById('adduser');
   if (au) au.onclick = () => modal(`<h2>Ajouter un utilisateur</h2><form novalidate><label>Nom<input name="name" required></label><label>E-mail<input name="email" type="email" required></label><label>Mot de passe provisoire<input name="password" type="text" minlength="8" required><span class="sub">À transmettre à la personne ; elle pourra le changer.</span></label><div class="row-actions"><button class="btn primary" type="submit">Ajouter l'utilisateur</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
     const f = m.querySelector('form'); f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { await api('POST', '/users', formData(f)); close(); toast('Utilisateur ajouté'); pageSettings(); }); };
