@@ -411,6 +411,21 @@ route('POST', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true }
   return { ok: true };
 });
 
+route('DELETE', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true }, async (req, res, b, p) => {
+  if (Number(p.id) === req.user.company_id) throw bad('Vous ne pouvez pas supprimer votre propre entreprise');
+  const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [p.id]);
+  if (!rows[0]) throw new HttpError(404, 'Entreprise introuvable');
+  if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
+  await db.tx(async t => {
+    await t.query('DELETE FROM payments WHERE company_id = $1', [p.id]);
+    await t.query('DELETE FROM invoices WHERE company_id = $1', [p.id]);
+    await t.query('DELETE FROM clients WHERE company_id = $1', [p.id]);
+    await t.query('DELETE FROM users WHERE company_id = $1', [p.id]);
+    await t.query('DELETE FROM companies WHERE id = $1', [p.id]);
+  });
+  return { ok: true };
+});
+
 // ---------- serveur HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.ico': 'image/x-icon' };
 const PUBLIC = path.join(__dirname, 'public');

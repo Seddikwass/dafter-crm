@@ -603,8 +603,21 @@ async function pageAdmin() {
         <button class="btn small" data-a="add_months" data-v="12" data-id="${r.id}">+12 mois</button>
         <button class="btn small" data-a="extend_trial" data-v="14" data-id="${r.id}">Essai +14 j</button>
         <button class="btn small" data-a="plan" data-v="${r.plan === 'pro' ? 'essentiel' : 'pro'}" data-id="${r.id}">Passer en ${r.plan === 'pro' ? 'Essentiel' : 'Pro'}</button>
+        ${r.id !== S.me.company.id ? `<button class="btn small danger" data-delco="${r.id}" data-name="${esc(r.name)}">Supprimer</button>` : ''}
         <button class="btn small danger" data-a="status" data-v="${r.status === 'suspended' ? 'active' : 'suspended'}" data-id="${r.id}">${r.status === 'suspended' ? 'Réactiver' : 'Suspendre'}</button>
       </div></div></div>`).join('')}</div>`);
+  document.querySelectorAll('[data-delco]').forEach(b => b.onclick = () => {
+    const name = b.dataset.name;
+    modal(`<h2>Supprimer ${esc(name)} ?</h2><p>L'entreprise, ses utilisateurs, clients, factures et paiements seront effacés définitivement. Ses utilisateurs ne pourront plus se connecter.</p>
+      <form novalidate><label>Pour confirmer, tapez le nom de l'entreprise : <b>${esc(name)}</b><input name="confirm_name" autocomplete="off"></label>
+      <div class="row-actions"><button class="btn danger" type="submit">Supprimer définitivement</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+      const f = m.querySelector('form');
+      f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
+        await api('DELETE', '/admin/companies/' + b.dataset.delco, { confirm_name: f.elements.confirm_name.value });
+        close(); toast('Entreprise supprimée'); pageAdmin();
+      }); };
+    });
+  });
   document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => guard(b, async () => {
     await api('POST', '/admin/companies/' + b.dataset.id, { [b.dataset.a]: b.dataset.v }); toast('Abonnement mis à jour'); pageAdmin();
   }));
