@@ -455,10 +455,27 @@ function reminderButtons(inv) {
   if (inv.status === 'payee') return '';
   const c = inv.client || {}; const txt = reminderText(inv);
   const out = [];
-  if (c.phone) out.push(`<a class="btn small wa" target="_blank" rel="noopener" href="https://wa.me/${phoneIntl(c.phone)}?text=${encodeURIComponent(txt)}">Relancer par WhatsApp</a>`, `<a class="btn small" href="sms:${esc(c.phone)}?body=${encodeURIComponent(txt)}">SMS</a>`, `<a class="btn small" href="tel:${esc(c.phone)}">Appeler</a>`);
-  if (c.email) out.push(`<a class="btn small" href="mailto:${esc(c.email)}?subject=${encodeURIComponent('Facture ' + inv.number)}&body=${encodeURIComponent(txt)}">Relancer par e-mail</a>`);
+  if (c.phone) out.push(`<a class="btn small wa" data-rec="whatsapp" target="_blank" rel="noopener" href="https://wa.me/${phoneIntl(c.phone)}?text=${encodeURIComponent(txt)}">Relancer par WhatsApp</a>`, `<a class="btn small" data-rec="sms" href="sms:${esc(c.phone)}?body=${encodeURIComponent(txt)}">SMS</a>`, `<a class="btn small" data-rec="telephone" href="tel:${esc(c.phone)}">Appeler</a>`);
+  if (c.email) out.push(`<a class="btn small" data-rec="email" href="mailto:${esc(c.email)}?subject=${encodeURIComponent('Facture ' + inv.number)}&body=${encodeURIComponent(txt)}">Relancer par e-mail</a>`);
   if (!out.length) return `<p class="sub">Ajoutez un téléphone ou un e-mail au client pour pouvoir le relancer.</p>`;
-  return `<div class="row-actions">${out.join('')}</div>`;
+  return `<div class="row-actions">${out.join('')}</div><p class="sub">Chaque relance est notée dans l'historique ci-dessous.</p>`;
+}
+const CHANNEL = { email: 'E-mail', whatsapp: 'WhatsApp', sms: 'SMS', telephone: 'Appel', courrier: 'Courrier' };
+function currentStep(daysOverdue) {
+  const steps = S.me.company.reminder_settings?.steps || [-3, 7, 15, 30];
+  const reached = steps.filter(st => daysOverdue >= st);
+  return reached.length ? reached[reached.length - 1] : daysOverdue;
+}
+// Note la relance quand on touche un bouton WhatsApp, SMS, Appel ou e-mail (le lien s'ouvre normalement).
+function bindReminderRecord(rootEl, getInfo, after) {
+  rootEl.querySelectorAll('[data-rec]').forEach(a => a.addEventListener('click', () => {
+    const info = getInfo(a);
+    api('POST', '/reminders', { invoice_id: info.invoice_id, step: info.step, channel: a.dataset.rec, message: info.message }).then(() => { toast('Relance notée dans l\'historique'); if (after) setTimeout(after, 800); }).catch(e => toast(e.message, true));
+  }));
+}
+function reminderHistory(list) {
+  if (!list || !list.length) return '<div class="list"><div class="empty">Aucune relance pour cette facture.</div></div>';
+  return `<div class="list">${list.map(r => `<div class="item ${r.status === 'echec' ? 's-retard' : ''}"><div class="main"><div class="t">${CHANNEL[r.channel] || r.channel}${r.auto ? ' automatique' : ''} · ${esc(({ rappel: 'rappel', amicale: 'amicale', ferme: 'ferme', dernier: 'dernier rappel' })[r.level] || '')}</div><div class="m">${new Date(r.sent_at).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' })}${r.user_name ? ' · ' + esc(r.user_name) : ''}${r.status === 'echec' ? ' · échec : ' + esc(r.error || '') : ''}</div></div><div class="r"><button class="btn small danger" data-delrem="${r.id}" aria-label="Supprimer de l'historique">Retirer</button></div></div>`).join('')}</div>`;
 }
 
 async function pageInvoice(id) {
@@ -480,6 +497,7 @@ async function pageInvoice(id) {
       ${inv.status !== 'payee' ? `<a class="btn" href="#/docs/avoir/nouveau?invoice=${inv.id}">Créer un avoir</a>` : ''}
     </div>
     ${inv.status !== 'payee' ? `<h2>Relancer le client</h2>${reminderButtons(inv)}` : ''}
+    <h2>Historique des relances</h2>${reminderHistory(inv.reminders)}
     <h2>Lignes</h2>
     <div class="list">${inv.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}
       <div class="item"><div class="main"><div class="m">HT ${plain(inv.total_ht)} · TVA ${plain(inv.total_tva)}${inv.timbre ? ' · timbre ' + plain(inv.timbre) : ''}</div></div><div class="r"><b>${amt(inv.total_ttc)}</b></div></div></div>
@@ -488,6 +506,8 @@ async function pageInvoice(id) {
     ${inv.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(inv.notes)}</div>` : ''}
     <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer la facture</button></div>`);
   const payBtn = document.getElementById('pay'); if (payBtn) payBtn.onclick = () => paymentModal(inv, () => pageInvoice(id));
+  bindReminderRecord(root, () => ({ invoice_id: inv.id, step: currentStep(inv.days_overdue), message: 'Relance facture ' + inv.number }), () => pageInvoice(id));
+  document.querySelectorAll('[data-delrem]').forEach(b => b.onclick = () => guard(b, async () => { await api('DELETE', '/reminders/' + b.dataset.delrem); pageInvoice(id); }));
   document.getElementById('print-btn').onclick = () => printInvoice(inv);
   document.getElementById('del').onclick = async e => {
     if (!await confirmBox(`Supprimer la facture ${inv.number} et ses paiements ?`)) return;
@@ -868,17 +888,26 @@ async function pagePayments() {
 // ---------- échéances ----------
 async function pageAlerts() {
   loading('#/alertes');
-  const al = await api('GET', '/alerts');
+  const [al, due] = await Promise.all([api('GET', '/alerts'), api('GET', '/reminders/due')]);
   S.alertsCount = al.overdue.length;
   const total = arr => arr.reduce((s, i) => s + i.balance, 0);
+  const autoOn = due.email_ready && due.settings.auto_email && ['active', 'trial'].includes(S.me.subscription.state);
   shell('#/alertes', `<h1>Échéances</h1>
-    <h2 style="margin-top:0">En retard${al.overdue.length ? ` · ${amt(total(al.overdue))}` : ''}</h2>
+    <h2 style="margin-top:0">À relancer aujourd'hui${due.list.length ? ' · ' + due.list.length : ''}</h2>
+    ${autoOn ? `<div class="banner info"><span>Les clients avec un e-mail sont relancés automatiquement.</span><button class="btn small" id="runrem">Envoyer maintenant</button></div>` : `<p class="sub" style="margin-top:-4px">${due.email_ready ? (S.me.subscription.state === 'free' ? 'Les relances automatiques par e-mail sont incluses dans Pro.' : 'Relances automatiques désactivées dans Compte.') : 'Touchez un bouton : le message est déjà rédigé et la relance est notée.'}</p>`}
+    <div class="list" id="due">${due.list.length ? due.list.map(r => `<div class="item ${r.days_overdue > 0 ? 's-retard' : 's-soon'}" data-inv="${r.invoice_id}" data-step="${r.step}" data-n="${esc(r.number)}"><div class="main"><a class="t" href="#/factures/${r.invoice_id}" style="color:inherit;display:block">${esc(r.client_name)}</a><div class="m">${esc(r.number)} · ${esc(r.level_label)} · ${r.days_overdue > 0 ? 'en retard ' + relDays(r.days_overdue) : 'échéance ' + relDays(r.days_overdue)}</div>
+      <div class="row-actions">${r.client_phone ? `<a class="btn small wa" data-rec="whatsapp" target="_blank" rel="noopener" href="https://wa.me/${phoneIntl(r.client_phone)}?text=${encodeURIComponent(r.body)}">WhatsApp</a><a class="btn small" data-rec="telephone" href="tel:${esc(r.client_phone)}">Appeler</a>` : ''}${r.client_email ? `<a class="btn small" data-rec="email" href="mailto:${esc(r.client_email)}?subject=${encodeURIComponent(r.subject)}&body=${encodeURIComponent(r.body)}">E-mail</a>` : ''}${!r.client_phone && !r.client_email ? `<a class="btn small" href="#/clients/${r.client_id}/modifier">Ajouter un contact</a>` : ''}</div></div>
+      <div class="r">${amt(r.balance)}</div></div>`).join('') : '<div class="empty">Personne à relancer aujourd\'hui.</div>'}</div>
+    <h2>En retard${al.overdue.length ? ` · ${amt(total(al.overdue))}` : ''}</h2>
     ${invoiceList(al.overdue, 'Aucune facture en retard.')}
     <h2>À échoir dans les 7 jours${al.upcoming.length ? ` · ${amt(total(al.upcoming))}` : ''}</h2>
     ${invoiceList(al.upcoming, 'Aucune échéance cette semaine.')}
     ${al.supplier_due.length ? `<h2>Fournisseurs à payer · ${amt(al.supplier_due.reduce((s, p) => s + p.balance, 0))}</h2>${purchaseList(al.supplier_due)}` : ''}
     ${al.low_stock.length ? `<h2>Stock bas</h2><div class="list">${al.low_stock.map(p => `<a class="item s-retard" href="#/stock"><div class="main"><div class="t">${esc(p.name)}</div><div class="m">alerte à ${Number(p.stock_alert || 0)}</div></div><div class="r"><b>${Number(p.stock)}</b> ${esc(p.unit || '')}</div></a>`).join('')}</div>` : ''}
-    <p class="sub" style="margin-top:16px">Ouvrez une facture pour relancer le client par WhatsApp, SMS ou e-mail avec un message déjà rédigé.</p>`);
+    <p class="sub" style="margin-top:16px">Les paliers de relance se règlent dans Compte, Relances.</p>`);
+  bindReminderRecord(document.getElementById('due'), a => { const it = a.closest('[data-inv]'); return { invoice_id: Number(it.dataset.inv), step: Number(it.dataset.step), message: 'Relance facture ' + it.dataset.n }; }, pageAlerts);
+  const rr = document.getElementById('runrem');
+  if (rr) rr.onclick = () => guard(rr, async () => { const r = await api('POST', '/reminders/run'); toast(r.sent ? `${r.sent} e-mail${r.sent > 1 ? 's' : ''} de relance envoyé${r.sent > 1 ? 's' : ''}` : 'Aucun e-mail à envoyer pour le moment'); pageAlerts(); });
 }
 
 // ---------- compte & paramètres ----------
@@ -927,6 +956,13 @@ async function pageSettings() {
       <label>Pied de facture (RIB, conditions…)<textarea name="invoice_footer" ${owner ? '' : 'disabled'}>${esc(c.invoice_footer)}</textarea></label>
       ${owner ? '<button class="btn primary" type="submit">Enregistrer</button>' : '<p class="sub">Seul le responsable du compte peut modifier ces informations.</p>'}
     </form>
+    <h2>Relances</h2>
+    <form id="remf" class="panel" novalidate>
+      <label>Paliers de relance (jours par rapport à l'échéance)<input name="steps" value="${esc((c.reminder_settings?.steps || [-3, 7, 15, 30]).join(', '))}" ${owner ? '' : 'disabled'}><span class="sub">Un nombre négatif relance avant l'échéance. Par défaut : -3 (rappel), 7 (amicale), 15 (ferme), 30 (dernier rappel avant mise en demeure).</span></label>
+      <label class="check"><input type="checkbox" name="auto_email" ${c.reminder_settings?.auto_email !== false ? 'checked' : ''} ${owner ? '' : 'disabled'}> Envoyer automatiquement les relances par e-mail (Pro)</label>
+      <p class="sub">${me.email_ready ? 'Envoi d\'e-mails actif. Les réponses de vos clients arrivent à l\'e-mail de votre entreprise' + (c.email ? ' (' + esc(c.email) + ')' : ' : renseignez-le ci-dessus') + '.' : 'L\'envoi automatique d\'e-mails sera bientôt activé sur Dafter. En attendant, relancez en un geste depuis Échéances.'}</p>
+      ${owner ? '<button class="btn primary" type="submit">Enregistrer les relances</button>' : ''}
+    </form>
     <h2>Équipe</h2>
     <div class="list">${users.map(u => `<div class="item"><div class="main"><div class="t">${esc(u.name)}${u.id === me.user.id ? ' (vous)' : ''}</div><div class="m">${esc(u.email)} · ${u.role === 'owner' ? 'responsable' : 'membre'}${u.id === me.user.id && me.user.is_superadmin ? ' · <b>administrateur de la plateforme</b>' : ''}</div></div>${owner && u.role !== 'owner' ? `<div class="r"><button class="btn small danger" data-deluser="${u.id}">Retirer</button></div>` : ''}</div>`).join('')}</div>
     ${owner ? '<div class="row-actions"><button class="btn" id="adduser">Ajouter un utilisateur</button></div>' : ''}
@@ -939,6 +975,8 @@ async function pageSettings() {
   cof.onsubmit = e => { e.preventDefault(); guard(cof.querySelector('button'), async () => { await api('PUT', '/company', formData(cof)); S.me = await api('GET', '/me'); toast('Informations enregistrées'); document.querySelector('.topbar .co').textContent = S.me.company.name; }); };
   const cr = document.getElementById('copyrib');
   if (cr) cr.onclick = async () => { try { await navigator.clipboard.writeText(me.payment.rib); toast('RIB copié'); } catch (_) { toast(me.payment.rib); } };
+  const remf = document.getElementById('remf');
+  remf.onsubmit = e => { e.preventDefault(); guard(remf.querySelector('[type=submit]'), async () => { await api('PUT', '/company/reminders', formData(remf)); S.me = await api('GET', '/me'); toast('Relances enregistrées'); }); };
   const pwf = document.getElementById('pwf');
   pwf.onsubmit = e => { e.preventDefault(); guard(pwf.querySelector('button'), async () => { await api('PUT', '/me/password', formData(pwf)); pwf.reset(); toast('Mot de passe changé'); }); };
   document.getElementById('logout').onclick = async () => { await api('POST', '/auth/logout'); S.me = null; location.hash = '#/connexion'; };

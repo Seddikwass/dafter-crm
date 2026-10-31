@@ -169,11 +169,13 @@ route('POST', '/api/auth/logout', { public: true }, async (req, res) => { setSes
 
 route('GET', '/api/me', async (req) => {
   const u = req.user;
+  runRemindersSoon(u.company_id);
   const { rows } = await db.query('SELECT * FROM companies WHERE id = $1', [u.company_id]);
   const c = rows[0];
   return {
     user: { id: u.id, name: u.name, email: u.email, role: u.role, is_superadmin: u.is_superadmin },
-    company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer },
+    company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer, reminder_settings: reminderSettings(c) },
+    email_ready: !!process.env.BREVO_API_KEY,
     subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, purchase_types: PURCHASE_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
     payment: { rib: process.env.PAYMENT_RIB || '', holder: process.env.PAYMENT_HOLDER || '', bank: process.env.PAYMENT_BANK || '', contact: process.env.PAYMENT_CONTACT || '' },
@@ -203,7 +205,7 @@ route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, r
   const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [cid]);
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
-    for (const tbl of ['payments', 'purchase_payments', 'stock_moves', 'documents', 'purchases', 'invoices', 'warehouses', 'products', 'clients', 'suppliers', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
+    for (const tbl of ['reminders', 'payments', 'purchase_payments', 'stock_moves', 'documents', 'purchases', 'invoices', 'warehouses', 'products', 'clients', 'suppliers', 'users']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [cid]);
     await t.query('DELETE FROM companies WHERE id = $1', [cid]);
   });
   setSession(req, res, '', 0);
@@ -368,7 +370,8 @@ route('GET', '/api/invoices/:id', async (req, res, b, p) => {
   const items = await db.query('SELECT items FROM invoices WHERE id = $1', [p.id]);
   const client = await db.query('SELECT * FROM clients WHERE id = $1', [inv.rows[0].client_id]);
   const pays = await db.query('SELECT * FROM payments WHERE invoice_id = $1 ORDER BY paid_on, id', [p.id]);
-  return { ...inv.rows[0], items: items.rows[0].items, client: client.rows[0], payments: pays.rows };
+  const rem = await db.query('SELECT r.*, u.name AS user_name FROM reminders r LEFT JOIN users u ON u.id = r.sent_by WHERE r.invoice_id = $1 ORDER BY r.sent_at DESC', [p.id]);
+  return { ...inv.rows[0], items: items.rows[0].items, client: client.rows[0], payments: pays.rows, reminders: rem.rows };
 });
 route('POST', '/api/invoices', async (req, res, b) => {
   const cid = req.user.company_id;
@@ -719,6 +722,119 @@ route('DELETE', '/api/purchase-payments/:id', async (req, res, b, p) => {
   return { ok: true };
 });
 
+// ---------- relances ----------
+const DEFAULT_STEPS = [-3, 7, 15, 30];
+function reminderSettings(c) {
+  const r = c.reminder_settings || {};
+  const steps = Array.isArray(r.steps) && r.steps.length ? r.steps : DEFAULT_STEPS;
+  return { auto_email: r.auto_email !== false, steps: [...new Set(steps.map(Number).filter(n => Number.isInteger(n) && n >= -30 && n <= 365))].sort((a, b) => a - b) };
+}
+function reminderLevel(step) {
+  if (step < 0) return { key: 'rappel', label: 'Rappel avant échéance' };
+  if (step <= 10) return { key: 'amicale', label: 'Relance amicale' };
+  if (step < 30) return { key: 'ferme', label: 'Relance ferme' };
+  return { key: 'dernier', label: 'Dernier rappel avant mise en demeure' };
+}
+const fmtDT = n => (Math.round(Number(n) * 1000) / 1000).toFixed(3).replace('.', ',') + ' DT';
+const fmtDate = d => { const [y, m, j] = String(d).slice(0, 10).split('-'); return `${j}/${m}/${y}`; };
+function reminderMessage(inv, step, co) {
+  const lvl = reminderLevel(step).key;
+  const base = `la facture ${inv.number} du ${fmtDate(inv.issue_date)}, d'un montant restant de ${fmtDT(inv.balance)}`;
+  const sign = `\n\nCordialement,\n${co.name}${co.phone ? '\n' + co.phone : ''}`;
+  const subject = { rappel: `Rappel : facture ${inv.number} à échéance le ${fmtDate(inv.due_date)}`, amicale: `Facture ${inv.number} en attente de règlement`, ferme: `Relance : facture ${inv.number} impayée`, dernier: `Dernier rappel avant mise en demeure : facture ${inv.number}` }[lvl];
+  const body = {
+    rappel: `Bonjour,\n\nPetit rappel : ${base} arrive à échéance le ${fmtDate(inv.due_date)}. Merci d'avance pour votre règlement.`,
+    amicale: `Bonjour,\n\nSauf erreur de notre part, ${base} était à régler le ${fmtDate(inv.due_date)}. Pourriez-vous nous indiquer la date de règlement prévue ? Si le paiement a déjà été effectué, merci de ne pas tenir compte de ce message.`,
+    ferme: `Bonjour,\n\nMalgré notre précédent rappel, ${base} reste impayée depuis le ${fmtDate(inv.due_date)}. Nous vous remercions de procéder au règlement dans les plus brefs délais.`,
+    dernier: `Bonjour,\n\n${base.charAt(0).toUpperCase() + base.slice(1)} reste impayée depuis le ${fmtDate(inv.due_date)}, malgré nos relances. Sans règlement sous 8 jours, nous serons contraints de vous adresser une mise en demeure.`,
+  }[lvl] + sign;
+  return { subject, body, level: lvl, level_label: reminderLevel(step).label };
+}
+// Relances dues : pour chaque facture non payée, le dernier palier atteint et pas encore fait.
+async function dueReminders(cid) {
+  const co = (await db.query('SELECT * FROM companies WHERE id = $1', [cid])).rows[0];
+  const set = reminderSettings(co);
+  const invs = (await db.query(`SELECT x.*, cl.email AS client_email, cl.phone AS client_phone FROM (${INVOICE_SELECT} WHERE i.company_id = $1) x JOIN clients cl ON cl.id = x.client_id WHERE x.status <> 'payee'`, [cid])).rows;
+  const done = (await db.query(`SELECT invoice_id, step FROM reminders WHERE company_id = $1 AND status = 'envoye'`, [cid])).rows;
+  const out = [];
+  for (const inv of invs) {
+    const reached = set.steps.filter(st => (-inv.days_overdue) <= -st); // jours depuis l'échéance >= palier
+    if (!reached.length) continue;
+    const step = reached[reached.length - 1];
+    if (done.some(d => d.invoice_id === inv.id && d.step >= step)) continue;
+    out.push({ ...inv, step, ...reminderMessage(inv, step, co) });
+  }
+  return { co, set, list: out.sort((a, b) => b.days_overdue - a.days_overdue) };
+}
+async function sendBrevo({ to, toName, subject, text, fromName, replyTo }) {
+  const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ sender: { email: process.env.BREVO_SENDER_EMAIL, name: fromName }, to: [{ email: to, name: toName }], subject, textContent: text, ...(replyTo ? { replyTo: { email: replyTo } } : {}) }),
+  });
+  if (!r.ok) throw new Error(`Brevo ${r.status} : ${(await r.text()).slice(0, 200)}`);
+}
+const lastRun = new Map();
+function runRemindersSoon(cid) {
+  if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) return;
+  const t = lastRun.get(cid) || 0;
+  if (Date.now() - t < 60 * 60e3) return;
+  lastRun.set(cid, Date.now());
+  autoRemind(cid).catch(e => console.error('Relances', cid, e.message));
+}
+async function autoRemind(cid) {
+  const { co, set, list } = await dueReminders(cid);
+  if (!set.auto_email || co.is_platform || !['active', 'trial'].includes(subscription(co).state)) return 0;
+  let n = 0;
+  const failed = (await db.query(`SELECT invoice_id, step FROM reminders WHERE company_id = $1 AND status = 'echec' AND sent_at > now() - interval '24 hours'`, [cid])).rows;
+  for (const r of list) {
+    if (!r.client_email || failed.some(f => f.invoice_id === r.id && f.step === r.step)) continue;
+    try {
+      await sendBrevo({ to: r.client_email, toName: r.client_name, subject: r.subject, text: r.body, fromName: `${co.name} via Dafter`, replyTo: co.email });
+      await db.query(`INSERT INTO reminders (company_id, invoice_id, step, level, channel, status, message, auto) VALUES ($1,$2,$3,$4,'email','envoye',$5,true)`, [cid, r.id, r.step, r.level, r.subject]);
+      n++;
+    } catch (e) {
+      await db.query(`INSERT INTO reminders (company_id, invoice_id, step, level, channel, status, message, error, auto) VALUES ($1,$2,$3,$4,'email','echec',$5,$6,true)`, [cid, r.id, r.step, r.level, r.subject, e.message]);
+    }
+  }
+  return n;
+}
+async function autoRemindAll() {
+  if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) return;
+  const cs = (await db.query('SELECT id FROM companies WHERE NOT is_platform')).rows;
+  for (const c of cs) { lastRun.set(c.id, Date.now()); await autoRemind(c.id).catch(e => console.error('Relances', c.id, e.message)); }
+}
+route('GET', '/api/reminders/due', async (req) => {
+  const { set, list } = await dueReminders(req.user.company_id);
+  return { settings: set, email_ready: !!process.env.BREVO_API_KEY, list: list.map(r => ({ invoice_id: r.id, number: r.number, client_id: r.client_id, client_name: r.client_name, client_email: r.client_email, client_phone: r.client_phone, balance: r.balance, due_date: r.due_date, days_overdue: r.days_overdue, step: r.step, level: r.level, level_label: r.level_label, subject: r.subject, body: r.body })) };
+});
+route('POST', '/api/reminders', async (req, res, b) => {
+  const cid = req.user.company_id;
+  const inv = (await db.query('SELECT id FROM invoices WHERE id = $1 AND company_id = $2', [b.invoice_id, cid])).rows[0];
+  if (!inv) throw bad('Facture introuvable');
+  if (!['email', 'whatsapp', 'sms', 'telephone', 'courrier'].includes(b.channel)) throw bad('Canal invalide');
+  const step = Number.isInteger(Number(b.step)) ? Number(b.step) : 0;
+  await db.query(`INSERT INTO reminders (company_id, invoice_id, step, level, channel, status, message, note, sent_by) VALUES ($1,$2,$3,$4,$5,'envoye',$6,$7,$8)`,
+    [cid, inv.id, step, reminderLevel(step).key, b.channel, str(b.message, 300), str(b.note, 1000), req.user.id]);
+  return { ok: true };
+});
+route('DELETE', '/api/reminders/:id', async (req, res, b, p) => {
+  await db.query('DELETE FROM reminders WHERE id = $1 AND company_id = $2', [p.id, req.user.company_id]);
+  return { ok: true };
+});
+route('PUT', '/api/company/reminders', { owner: true }, async (req, res, b) => {
+  const steps = String(b.steps || '').split(/[,; ]+/).filter(Boolean).map(Number);
+  if (!steps.length || steps.some(n => !Number.isInteger(n) || n < -30 || n > 365)) throw bad('Paliers invalides : indiquez des nombres de jours, par exemple -3, 7, 15, 30');
+  await db.query(`UPDATE companies SET reminder_settings = $1 WHERE id = $2`, [{ auto_email: !!b.auto_email, steps: [...new Set(steps)].sort((x, y) => x - y) }, req.user.company_id]);
+  return { ok: true };
+});
+route('POST', '/api/reminders/run', async (req) => {
+  if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw bad('L\'envoi d\'e-mails n\'est pas encore activé sur Dafter');
+  const n = await autoRemind(req.user.company_id);
+  lastRun.set(req.user.company_id, Date.now());
+  return { sent: n };
+});
+
 // ---------- paiements ----------
 route('GET', '/api/payments', async (req) => {
   const { rows } = await db.query(`SELECT p.*, i.number, cl.name AS client_name, cl.id AS client_id, u.name AS created_by_name
@@ -887,7 +1003,7 @@ route('DELETE', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true
   if (!rows[0]) throw new HttpError(404, 'Entreprise introuvable');
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
-    for (const tbl of ['payments', 'purchase_payments', 'stock_moves', 'documents', 'purchases', 'invoices', 'warehouses', 'products', 'suppliers']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [p.id]);
+    for (const tbl of ['reminders', 'payments', 'purchase_payments', 'stock_moves', 'documents', 'purchases', 'invoices', 'warehouses', 'products', 'suppliers']) await t.query(`DELETE FROM ${tbl} WHERE company_id = $1`, [p.id]);
     await t.query('DELETE FROM clients WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM users WHERE company_id = $1', [p.id]);
     await t.query('DELETE FROM companies WHERE id = $1', [p.id]);
@@ -974,4 +1090,6 @@ const server = http.createServer(async (req, res) => {
   });
   await db.query(`UPDATE companies SET plan = 'mensuel' WHERE plan NOT IN ('mensuel', 'annuel')`);
   server.listen(PORT, () => console.log(`CRM prêt sur le port ${PORT}`));
+  setTimeout(() => autoRemindAll().catch(e => console.error(e)), 60e3);
+  setInterval(() => autoRemindAll().catch(e => console.error(e)), 6 * 60 * 60e3);
 })().catch(e => { console.error(e); process.exit(1); });

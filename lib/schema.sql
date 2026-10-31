@@ -190,3 +190,23 @@ CREATE TABLE IF NOT EXISTS purchase_payments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS purchase_payments_purchase ON purchase_payments(purchase_id);
+
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS reminder_settings JSONB NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS reminders (
+  id SERIAL PRIMARY KEY,
+  company_id INT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  invoice_id INT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+  step INT NOT NULL DEFAULT 0,
+  level TEXT,
+  channel TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'envoye',
+  message TEXT,
+  note TEXT,
+  error TEXT,
+  auto BOOLEAN NOT NULL DEFAULT false,
+  sent_by INT REFERENCES users(id) ON DELETE SET NULL,
+  sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS reminders_invoice ON reminders(invoice_id);
+CREATE INDEX IF NOT EXISTS reminders_company ON reminders(company_id, status);
