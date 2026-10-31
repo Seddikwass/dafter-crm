@@ -222,3 +222,8 @@ a.item:hover { background: #fafbfd; }
 
 .tabs { scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
+
+.planpick { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 2px; margin: 0 0 12px; }
+.planpick legend { font-size: 13.5px; color: var(--muted); padding: 0 4px; }
+.planpick .check { margin-bottom: 8px; }
+.check input[type=radio] { width: 18px; height: 18px; min-height: 0; }

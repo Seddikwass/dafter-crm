@@ -157,8 +157,8 @@ route('POST', '/api/auth/register', { public: true }, async (req, res, b) => {
       const u = await t.query(`INSERT INTO users (company_id, name, email, password_hash, role, is_superadmin) VALUES ($1,$2,$3,$4,'owner',true) RETURNING id`, [pid, name, email, hashPassword(String(b.password))]);
       return u.rows[0];
     }
-    const c = await t.query(`INSERT INTO companies (name, phone, email, matricule_fiscal, trial_ends) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-      [companyName, str(b.phone, 40), email, normMF(b.matricule_fiscal), addDays(today(), TRIAL_DAYS)]);
+    const c = await t.query(`INSERT INTO companies (name, phone, email, matricule_fiscal, trial_ends, plan) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [companyName, str(b.phone, 40), email, normMF(b.matricule_fiscal), addDays(today(), TRIAL_DAYS), PLANS[b.plan] ? b.plan : 'mensuel']);
     const u = await t.query(`INSERT INTO users (company_id, name, email, password_hash, role, is_superadmin) VALUES ($1,$2,$3,$4,'owner',$5) RETURNING id`,
       [c.rows[0].id, name, email, hashPassword(String(b.password)), !!SUPERADMIN_EMAIL && email === SUPERADMIN_EMAIL]);
     return u.rows[0];
@@ -222,6 +222,12 @@ route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, r
     await t.query('DELETE FROM companies WHERE id = $1', [cid]);
   });
   setSession(req, res, '', 0);
+  return { ok: true };
+});
+
+route('PUT', '/api/company/plan', { owner: true, readOnlyOk: true }, async (req, res, b) => {
+  if (!PLANS[b.plan]) throw bad('Formule inconnue');
+  await db.query('UPDATE companies SET plan = $1 WHERE id = $2', [b.plan, req.user.company_id]);
   return { ok: true };
 });
 

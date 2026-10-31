@@ -52,7 +52,7 @@ function toast(msg, err) {
 }
 function formData(form) {
   const o = {};
-  for (const el of form.elements) { if (!el.name) continue; o[el.name] = el.type === 'checkbox' ? el.checked : el.value; }
+  for (const el of form.elements) { if (!el.name || (el.type === 'radio' && !el.checked)) continue; o[el.name] = el.type === 'checkbox' ? el.checked : el.value; }
   return o;
 }
 async function guard(btn, fn) {
@@ -174,7 +174,11 @@ function authPage(mode) {
         <div class="err-msg" id="e"></div>
         ${reg ? `<label>Nom de l'entreprise<input name="companyName" required autocomplete="organization"></label>
         <label>Votre nom<input name="name" required autocomplete="name"></label>
-        <label>Téléphone<input name="phone" type="tel" autocomplete="tel" placeholder="98 123 456"></label>` : ''}
+        <label>Téléphone<input name="phone" type="tel" autocomplete="tel" placeholder="98 123 456"></label>
+        <fieldset class="planpick"><legend>Formule après l'essai</legend>
+          <label class="check"><input type="radio" name="plan" value="mensuel" checked> Pro mensuel : 40 DT par mois</label>
+          <label class="check"><input type="radio" name="plan" value="annuel"> Pro annuel : 400 DT par an (2 mois offerts)</label>
+        </fieldset>` : ''}
         <label>E-mail<input name="email" type="email" required autocomplete="email"></label>
         <label>Mot de passe<input name="password" type="password" required minlength="8" autocomplete="${reg ? 'new-password' : 'current-password'}">${reg ? '<span class="sub">8 caractères minimum</span>' : ''}</label>
         <button class="btn primary" type="submit">${reg ? 'Créer mon compte' : 'Se connecter'}</button>
@@ -1008,10 +1012,10 @@ async function pageSettings() {
     <h2 style="margin-top:0">Abonnement</h2>
     <div class="panel">
       <dl class="kv"><dt>Formule</dt><dd>${esc(sub.plan_label)}${sub.price ? ` · ${sub.price.toLocaleString('fr-FR')} DT par ${sub.period}` : ''}</dd><dt>État</dt><dd>${stateText}</dd></dl>
-      <div class="plans" style="max-width:none;margin-top:14px">${Object.entries(me.plans).map(([k, p]) => `<div style="border-color:var(--line)${k === sub.plan ? ';outline:2px solid var(--door)' : ''}"><b>${p.label}${k === sub.plan ? ' · votre formule' : ''}</b><span class="p" style="font-size:20px">${p.price.toLocaleString('fr-FR')} DT</span> par ${p.period}<br><span class="sub">${k === 'annuel' ? `2 mois offerts, soit ${(p.price / 12).toFixed(2).replace('.', ',')} DT par mois` : 'sans engagement, factures illimitées'}</span></div>`).join('')}</div>
+      <div class="plans" style="max-width:none;margin-top:14px">${Object.entries(me.plans).map(([k, p]) => { const mine = k === sub.paid_plan; return `<div style="border-color:var(--line)${mine ? ';outline:2px solid var(--door)' : ''}"><b>${p.label}${mine ? ' · votre choix' : ''}</b><span class="p" style="font-size:20px">${p.price.toLocaleString('fr-FR')} DT</span> par ${p.period}<br><span class="sub">${k === 'annuel' ? `2 mois offerts, soit ${(p.price / 12).toFixed(2).replace('.', ',')} DT par mois` : 'sans engagement, factures illimitées'}</span>${!mine && owner ? `<div style="margin-top:8px"><button type="button" class="btn small" data-plan="${k}">Choisir ${k === 'annuel' ? 'l\'annuel' : 'le mensuel'}</button></div>` : ''}</div>`; }).join('')}</div>
       ${me.payment.rib ? `<h2 style="margin-top:18px">Payer par virement ou versement</h2>
       <dl class="kv">${me.payment.holder ? `<dt>Titulaire</dt><dd>${esc(me.payment.holder)}</dd>` : ''}${me.payment.bank ? `<dt>Banque</dt><dd>${esc(me.payment.bank)}</dd>` : ''}<dt>RIB</dt><dd class="num" style="font-weight:500;word-break:break-all">${esc(me.payment.rib)}</dd>
-        <dt>Motif</dt><dd>Dafter ${esc(c.name)}</dd><dt>Montant</dt><dd>40 DT (1 mois) ou 400 DT (1 an)</dd></dl>
+        <dt>Motif</dt><dd>Dafter ${esc(c.name)}</dd><dt>Montant</dt><dd><b>${sub.paid_plan === 'annuel' ? '400 DT (Pro annuel, 12 mois)' : '40 DT (Pro mensuel, 1 mois)'}</b></dd></dl>
       <div class="row-actions"><button class="btn small" id="copyrib">Copier le RIB</button></div>
       <p style="margin-bottom:0" class="sub">À la réception du paiement, l'abonnement sera activé.${me.payment.contact ? ` Pour accélérer, envoyez le reçu à <b>${esc(me.payment.contact)}</b>.` : ''}</p>` : `<p style="margin-bottom:0">${me.payment_info ? esc(me.payment_info) : 'Paiement par virement ou versement. À la réception du paiement, l\'abonnement sera activé.'}</p>`}
     </div>
@@ -1047,6 +1051,7 @@ async function pageSettings() {
     <p class="sign">Dafter · créé par Wassim Khalfalli</p>`);
   const cof = document.getElementById('cof');
   cof.onsubmit = e => { e.preventDefault(); guard(cof.querySelector('button'), async () => { await api('PUT', '/company', formData(cof)); S.me = await api('GET', '/me'); toast('Informations enregistrées'); document.querySelector('.topbar .co').textContent = S.me.company.name; }); };
+  document.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => guard(b, async () => { await api('PUT', '/company/plan', { plan: b.dataset.plan }); toast(b.dataset.plan === 'annuel' ? 'Formule annuelle choisie : 400 DT par an' : 'Formule mensuelle choisie : 40 DT par mois'); pageSettings(); }));
   const cr = document.getElementById('copyrib');
   if (cr) cr.onclick = async () => { try { await navigator.clipboard.writeText(me.payment.rib); toast('RIB copié'); } catch (_) { toast(me.payment.rib); } };
   const remf = document.getElementById('remf');
@@ -1084,11 +1089,11 @@ async function pageAdmin() {
       <div><div class="k">En essai / gratuits</div><div class="v">${rows.filter(r => r.sub.state === 'trial').length} / ${rows.filter(r => r.sub.state === 'free').length}</div></div><div><div class="k">Revenu mensuel moyen</div><div class="v">${amt(mrr, false)}</div></div></div>
     <h2>Entreprises inscrites</h2>
     <div class="list">${rows.map(r => `<div class="item"><div class="main"><div class="t">${esc(r.name)} <span class="tag ${cls[r.sub.state]}">${label[r.sub.state]}</span></div>
-      <div class="m">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''} · ${r.sub.plan_label}${r.sub.state === 'free' ? '' : ` · jusqu'au ${fdate(r.sub.ends)}`}</div>
+      <div class="m">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''} · ${r.sub.plan_label}${r.sub.state === 'free' ? '' : ` · jusqu'au ${fdate(r.sub.ends)}`} · choix : <b>${r.plan === 'annuel' ? 'annuel 400 DT' : 'mensuel 40 DT'}</b></div>
       <div class="m">${r.users} util. · ${r.clients} clients · ${r.invoices} factures · inscrit le ${fdate(r.created_at)}</div>
       <div class="row-actions">
-        <button class="btn small primary" data-a="add_months" data-v="1" data-id="${r.id}">40 DT reçus : +1 mois</button>
-        <button class="btn small primary" data-a="add_months" data-v="12" data-id="${r.id}" data-plan="annuel">400 DT reçus : +12 mois</button>
+        <button class="btn small ${r.plan === 'annuel' ? '' : 'primary'}" data-a="add_months" data-v="1" data-id="${r.id}">40 DT reçus : +1 mois</button>
+        <button class="btn small ${r.plan === 'annuel' ? 'primary' : ''}" data-a="add_months" data-v="12" data-id="${r.id}" data-plan="annuel">400 DT reçus : +12 mois</button>
         <button class="btn small" data-a="extend_trial" data-v="14" data-id="${r.id}">Essai +14 j</button>
         <button class="btn small" data-a="plan" data-v="${r.plan === 'annuel' ? 'mensuel' : 'annuel'}" data-id="${r.id}">Passer en ${r.plan === 'annuel' ? 'Mensuel' : 'Annuel'}</button>
         <button class="btn small" data-users="${r.id}" data-name="${esc(r.name)}">Utilisateurs</button>
