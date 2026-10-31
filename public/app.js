@@ -542,6 +542,7 @@ async function pageSettings() {
   const users = await api('GET', '/users');
   const stateText = { trial: `Essai gratuit jusqu'au ${fdate(sub.ends)}`, active: `Actif jusqu'au ${fdate(sub.ends)}`, expired: `Expiré depuis le ${fdate(sub.ends)}`, suspended: 'Suspendu' }[sub.state];
   shell('#/parametres', `<h1>Compte</h1>
+    ${me.user.is_superadmin ? '<div class="banner info"><span>Vous êtes <b>administrateur de la plateforme</b> : vous gérez les abonnements de toutes les entreprises inscrites.</span><a class="btn small primary" href="#/admin">Gérer les abonnés</a></div>' : ''}
     <h2 style="margin-top:0">Abonnement</h2>
     <div class="panel">
       <dl class="kv"><dt>Formule</dt><dd>${esc(sub.plan_label)} · ${sub.price} DT / mois</dd><dt>État</dt><dd>${stateText}</dd></dl>
@@ -564,7 +565,7 @@ async function pageSettings() {
       ${owner ? '<button class="btn primary" type="submit">Enregistrer</button>' : '<p class="sub">Seul le responsable du compte peut modifier ces informations.</p>'}
     </form>
     <h2>Équipe</h2>
-    <div class="list">${users.map(u => `<div class="item"><div class="main"><div class="t">${esc(u.name)}${u.id === me.user.id ? ' (vous)' : ''}</div><div class="m">${esc(u.email)} · ${u.role === 'owner' ? 'responsable' : 'membre'}</div></div>${owner && u.role !== 'owner' ? `<div class="r"><button class="btn small danger" data-deluser="${u.id}">Retirer</button></div>` : ''}</div>`).join('')}</div>
+    <div class="list">${users.map(u => `<div class="item"><div class="main"><div class="t">${esc(u.name)}${u.id === me.user.id ? ' (vous)' : ''}</div><div class="m">${esc(u.email)} · ${u.role === 'owner' ? 'responsable' : 'membre'}${u.id === me.user.id && me.user.is_superadmin ? ' · <b>administrateur de la plateforme</b>' : ''}</div></div>${owner && u.role !== 'owner' ? `<div class="r"><button class="btn small danger" data-deluser="${u.id}">Retirer</button></div>` : ''}</div>`).join('')}</div>
     ${owner ? '<div class="row-actions"><button class="btn" id="adduser">Ajouter un utilisateur</button></div>' : ''}
     <h2>Sécurité</h2>
     <form id="pwf" class="panel" novalidate><div class="grid2"><label>Mot de passe actuel<input name="current" type="password" autocomplete="current-password"></label><label>Nouveau mot de passe<input name="next" type="password" minlength="8" autocomplete="new-password"></label></div><button class="btn" type="submit">Changer le mot de passe</button></form>
