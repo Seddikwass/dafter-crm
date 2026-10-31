@@ -78,6 +78,7 @@ CREATE INDEX IF NOT EXISTS payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS payments_company ON payments(company_id, paid_on);
 
 ALTER TABLE companies ADD COLUMN IF NOT EXISTS doc_seq JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS is_platform BOOLEAN NOT NULL DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS products (
   id SERIAL PRIMARY KEY,

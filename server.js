@@ -104,7 +104,7 @@ async function loadUser(req) {
   const p = verify(cookies(req).sid);
   if (!p) return null;
   const { rows } = await db.query(
-    `SELECT u.id, u.name, u.email, u.role, u.is_superadmin, u.company_id, c.name AS company_name, c.plan, c.status, c.trial_ends, c.paid_until
+    `SELECT u.id, u.name, u.email, u.role, u.is_superadmin, u.company_id, c.name AS company_name, c.plan, c.status, c.trial_ends, c.paid_until, c.is_platform
      FROM users u JOIN companies c ON c.id = u.company_id WHERE u.id = $1`, [p.uid]);
   return rows[0] || null;
 }
@@ -120,6 +120,11 @@ route('POST', '/api/auth/register', { public: true }, async (req, res, b) => {
   const exists = await db.query('SELECT 1 FROM users WHERE email = $1', [email]);
   if (exists.rows.length) throw bad('Un compte existe déjà avec cet e-mail');
   const user = await db.tx(async t => {
+    if (SUPERADMIN_EMAIL && email === SUPERADMIN_EMAIL) {
+      const pid = await platformCompany(t);
+      const u = await t.query(`INSERT INTO users (company_id, name, email, password_hash, role, is_superadmin) VALUES ($1,$2,$3,$4,'owner',true) RETURNING id`, [pid, name, email, hashPassword(String(b.password))]);
+      return u.rows[0];
+    }
     const c = await t.query(`INSERT INTO companies (name, phone, email, matricule_fiscal, trial_ends) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
       [companyName, str(b.phone, 40), email, str(b.matricule_fiscal, 40), addDays(today(), TRIAL_DAYS)]);
     const u = await t.query(`INSERT INTO users (company_id, name, email, password_hash, role, is_superadmin) VALUES ($1,$2,$3,$4,'owner',$5) RETURNING id`,
@@ -149,7 +154,7 @@ route('GET', '/api/me', async (req) => {
   const c = rows[0];
   return {
     user: { id: u.id, name: u.name, email: u.email, role: u.role, is_superadmin: u.is_superadmin },
-    company: { id: c.id, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer },
+    company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer },
     subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
     payment: { rib: process.env.PAYMENT_RIB || '', holder: process.env.PAYMENT_HOLDER || '', bank: process.env.PAYMENT_BANK || '', contact: process.env.PAYMENT_CONTACT || '' },
@@ -175,6 +180,7 @@ route('PUT', '/api/company', { owner: true, readOnlyOk: true }, async (req, res,
 
 route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, res, b) => {
   const cid = req.user.company_id;
+  if (req.user.is_platform) throw bad('L\'espace d\'administration ne peut pas être supprimé');
   const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [cid]);
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
   await db.tx(async t => {
@@ -538,9 +544,74 @@ route('GET', '/api/admin/companies', { superadmin: true, readOnlyOk: true }, asy
   const { rows } = await db.query(`SELECT c.id, c.name, c.email, c.phone, c.plan, c.status, c.trial_ends, c.paid_until, c.created_at,
       (SELECT count(*) FROM users u WHERE u.company_id=c.id)::int users, (SELECT count(*) FROM clients cl WHERE cl.company_id=c.id)::int clients,
       (SELECT count(*) FROM invoices i WHERE i.company_id=c.id)::int invoices, (SELECT max(last_login) FROM users u WHERE u.company_id=c.id) last_login
-    FROM companies c ORDER BY c.created_at DESC`);
+    FROM companies c WHERE NOT c.is_platform ORDER BY c.created_at DESC`);
   return rows.map(c => ({ ...c, sub: subscription(c) }));
 });
+async function platformCompany(t) {
+  const r = await t.query('SELECT id FROM companies WHERE is_platform LIMIT 1');
+  if (r.rows[0]) return r.rows[0].id;
+  const c = await t.query(`INSERT INTO companies (name, is_platform, trial_ends, status) VALUES ('Administration Dafter', true, '2099-12-31', 'active') RETURNING id`);
+  return c.rows[0].id;
+}
+function accountFields(b) {
+  const name = str(b.name, 120), email = str(b.email, 160)?.toLowerCase();
+  if (!name) throw bad('Nom obligatoire');
+  if (!isEmail(email)) throw bad('E-mail invalide');
+  if (!b.password || String(b.password).length < 8) throw bad('Le mot de passe doit contenir au moins 8 caractères');
+  return { name, email, hash: hashPassword(String(b.password)) };
+}
+route('POST', '/api/admin/companies', { superadmin: true, readOnlyOk: true }, async (req, res, b) => {
+  const companyName = str(b.companyName, 120); if (!companyName) throw bad('Nom de l\'entreprise obligatoire');
+  const a = accountFields(b);
+  const ex = await db.query('SELECT 1 FROM users WHERE email = $1', [a.email]);
+  if (ex.rows.length) throw bad('Un compte existe déjà avec cet e-mail');
+  const months = Math.max(0, Math.min(24, parseInt(b.months, 10) || 0));
+  return db.tx(async t => {
+    const c = await t.query(`INSERT INTO companies (name, phone, email, matricule_fiscal, trial_ends, plan, paid_until, status) VALUES ($1,$2,$3,$4,$5,$6,$7,'active') RETURNING id`,
+      [companyName, str(b.phone, 40), a.email, str(b.matricule_fiscal, 40), addDays(today(), TRIAL_DAYS), PLANS[b.plan] ? b.plan : 'mensuel', months ? addMonths(today(), months) : null]);
+    await t.query(`INSERT INTO users (company_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,'owner')`, [c.rows[0].id, a.name, a.email, a.hash]);
+    return { id: c.rows[0].id };
+  });
+});
+route('GET', '/api/admin/companies/:id/users', { superadmin: true, readOnlyOk: true }, async (req, res, b, p) => {
+  const { rows } = await db.query('SELECT id, name, email, role, last_login FROM users WHERE company_id = $1 ORDER BY id', [p.id]);
+  return rows;
+});
+route('POST', '/api/admin/users/:id/password', { superadmin: true, readOnlyOk: true }, async (req, res, b, p) => {
+  if (!b.password || String(b.password).length < 8) throw bad('Le mot de passe doit contenir au moins 8 caractères');
+  const r = await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hashPassword(String(b.password)), p.id]);
+  if (!r.rowCount) throw new HttpError(404, 'Utilisateur introuvable');
+  return { ok: true };
+});
+route('GET', '/api/admin/admins', { superadmin: true, readOnlyOk: true }, async () => {
+  const { rows } = await db.query(`SELECT u.id, u.name, u.email, u.last_login, c.is_platform, c.name AS company_name FROM users u JOIN companies c ON c.id = u.company_id WHERE u.is_superadmin ORDER BY u.id`);
+  return rows.map(r => ({ ...r, protected: !!SUPERADMIN_EMAIL && r.email === SUPERADMIN_EMAIL }));
+});
+route('POST', '/api/admin/admins', { superadmin: true, readOnlyOk: true }, async (req, res, b) => {
+  const email = str(b.email, 160)?.toLowerCase();
+  const ex = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+  if (ex.rows[0]) {
+    if (b.password) throw bad('Un compte existe déjà avec cet e-mail : laissez le mot de passe vide pour lui donner les droits d\'administrateur');
+    await db.query('UPDATE users SET is_superadmin = true WHERE id = $1', [ex.rows[0].id]);
+    return { ok: true, promoted: true };
+  }
+  const a = accountFields(b);
+  await db.tx(async t => {
+    const pid = await platformCompany(t);
+    await t.query(`INSERT INTO users (company_id, name, email, password_hash, role, is_superadmin) VALUES ($1,$2,$3,$4,'owner',true)`, [pid, a.name, a.email, a.hash]);
+  });
+  return { ok: true };
+});
+route('DELETE', '/api/admin/admins/:id', { superadmin: true, readOnlyOk: true }, async (req, res, b, p) => {
+  if (Number(p.id) === req.user.id) throw bad('Vous ne pouvez pas retirer vos propres droits');
+  const { rows } = await db.query('SELECT u.email, c.is_platform FROM users u JOIN companies c ON c.id = u.company_id WHERE u.id = $1', [p.id]);
+  if (!rows[0]) throw new HttpError(404, 'Administrateur introuvable');
+  if (SUPERADMIN_EMAIL && rows[0].email === SUPERADMIN_EMAIL) throw bad('Ce compte est l\'administrateur principal : il ne peut pas être retiré');
+  if (rows[0].is_platform) await db.query('DELETE FROM users WHERE id = $1', [p.id]);
+  else await db.query('UPDATE users SET is_superadmin = false WHERE id = $1', [p.id]);
+  return { ok: true };
+});
+
 route('POST', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true }, async (req, res, b, p) => {
   const { rows } = await db.query('SELECT * FROM companies WHERE id = $1', [p.id]);
   const c = rows[0]; if (!c) throw new HttpError(404, 'Entreprise introuvable');
@@ -557,6 +628,8 @@ route('POST', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true }
 
 route('DELETE', '/api/admin/companies/:id', { superadmin: true, readOnlyOk: true }, async (req, res, b, p) => {
   if (Number(p.id) === req.user.company_id) throw bad('Vous ne pouvez pas supprimer votre propre entreprise');
+  const plat = await db.query('SELECT is_platform FROM companies WHERE id = $1', [p.id]);
+  if (plat.rows[0]?.is_platform) throw bad('Espace d\'administration protégé');
   const { rows } = await db.query('SELECT name FROM companies WHERE id = $1', [p.id]);
   if (!rows[0]) throw new HttpError(404, 'Entreprise introuvable');
   if (String(b.confirm_name || '').trim() !== rows[0].name.trim()) throw bad('Le nom saisi ne correspond pas');
@@ -638,6 +711,17 @@ const server = http.createServer(async (req, res) => {
   }
   for (const stmt of fs.readFileSync(path.join(__dirname, 'lib/schema.sql'), 'utf8').split(';').map(s => s.trim()).filter(Boolean)) await db.query(stmt);
   await db.query(`ALTER TABLE companies ALTER COLUMN plan SET DEFAULT 'mensuel'`);
+  if (SUPERADMIN_EMAIL) await db.tx(async t => {
+    const u = (await t.query('SELECT u.id, u.company_id, c.is_platform FROM users u JOIN companies c ON c.id = u.company_id WHERE u.email = $1', [SUPERADMIN_EMAIL])).rows[0];
+    if (!u || u.is_platform) return;
+    const n = (await t.query(`SELECT (SELECT count(*) FROM clients WHERE company_id = $1) + (SELECT count(*) FROM invoices WHERE company_id = $1) + (SELECT count(*) FROM products WHERE company_id = $1) + (SELECT count(*) FROM users WHERE company_id = $1 AND id <> $2) AS n`, [u.company_id, u.id])).rows[0].n;
+    if (Number(n) > 0) { console.log('Administrateur principal laissé dans son entreprise : elle contient des données'); return; }
+    const pid = await platformCompany(t);
+    await t.query('UPDATE users SET company_id = $1, is_superadmin = true WHERE id = $2', [pid, u.id]);
+    await t.query('DELETE FROM documents WHERE company_id = $1', [u.company_id]);
+    await t.query('DELETE FROM companies WHERE id = $1', [u.company_id]);
+    console.log('Administrateur principal déplacé dans l\'espace d\'administration');
+  });
   await db.query(`UPDATE companies SET plan = 'mensuel' WHERE plan NOT IN ('mensuel', 'annuel')`);
   server.listen(PORT, () => console.log(`CRM prêt sur le port ${PORT}`));
 })().catch(e => { console.error(e); process.exit(1); });

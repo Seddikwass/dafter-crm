@@ -128,19 +128,21 @@ const icon = k => `<svg viewBox="0 0 24 24" aria-hidden="true">${I[k]}</svg>`;
 // ---------- coque ----------
 function shell(active, content) {
   const me = S.me; const sub = me.subscription;
-  const links = [
+  const plat = me.company.is_platform;
+  const links = plat ? [['#/admin', 'shield', 'Abonnés'], ['#/admin/acces', 'users', 'Accès'], ['#/parametres', 'gear', 'Compte']] : [
     ['#/', 'home', 'Accueil'], ['#/clients', 'users', 'Clients'], ['#/factures', 'doc', 'Factures'],
     ['#/paiements', 'cash', 'Paiements'], ['#/alertes', 'bell', 'Échéances'], ['#/parametres', 'gear', 'Compte'],
   ];
-  if (me.user.is_superadmin) links.push(['#/admin', 'shield', 'Abonnés']);
+  if (me.user.is_superadmin && !plat) links.push(['#/admin', 'shield', 'Abonnés']);
   let banner = '';
-  if (sub.state === 'trial') banner = `<div class="banner info">Essai Pro offert : ${sub.days_left > 0 ? `il reste ${sub.days_left} jour${sub.days_left > 1 ? 's' : ''}` : "dernier jour aujourd'hui"}. <a href="#/parametres">Voir l'abonnement</a></div>`;
+  if (plat) banner = '';
+  else if (sub.state === 'trial') banner = `<div class="banner info">Essai Pro offert : ${sub.days_left > 0 ? `il reste ${sub.days_left} jour${sub.days_left > 1 ? 's' : ''}` : "dernier jour aujourd'hui"}. <a href="#/parametres">Voir l'abonnement</a></div>`;
   else if (sub.state === 'free') banner = `<div class="banner ${me.invoices_this_month >= sub.free_limit ? 'warn' : 'info'}">Formule gratuite : ${me.invoices_this_month} / ${sub.free_limit} factures ce mois. <a href="#/parametres">Passer à Pro, 40 DT par mois</a></div>`;
   else if (sub.state === 'suspended') banner = `<div class="banner err">Compte suspendu. Contactez le support pour le réactiver.</div>`;
   else if (sub.days_left <= 5) banner = `<div class="banner warn">Votre abonnement se termine le ${fdate(sub.ends)}. <a href="#/parametres">Renouveler</a></div>`;
   root.innerHTML = `<div class="app">
-    <header class="topbar"><span class="brand">Dafter</span><span class="co">${esc(me.company.name)}</span></header>
-    <nav class="nav" aria-label="Navigation">${links.map(([h, i, l]) => `<a href="${h}" class="${active === h ? 'on' : ''}${h === '#/admin' ? ' desk' : ''}" ${active === h ? 'aria-current="page"' : ''}>${icon(i)}<span>${l}</span>${h === '#/alertes' && S.alertsCount ? `<span class="dot">${S.alertsCount}</span>` : ''}</a>`).join('')}</nav>
+    <header class="topbar"><span class="brand">Dafter</span><span class="co">${plat ? 'Administration' : esc(me.company.name)}</span></header>
+    <nav class="nav" aria-label="Navigation">${links.map(([h, i, l]) => `<a href="${h}" class="${active === h ? 'on' : ''}${h === '#/admin' && !plat ? ' desk' : ''}" ${active === h ? 'aria-current="page"' : ''}>${icon(i)}<span>${l}</span>${h === '#/alertes' && S.alertsCount ? `<span class="dot">${S.alertsCount}</span>` : ''}</a>`).join('')}</nav>
     <main>${banner}${content}</main></div>`;
   window.scrollTo(0, 0);
 }
@@ -700,6 +702,18 @@ async function pageSettings() {
   loading('#/parametres');
   S.me = await api('GET', '/me');
   const me = S.me, c = me.company, sub = me.subscription, owner = me.user.role === 'owner';
+  if (c.is_platform) {
+    shell('#/parametres', `<h1>Compte</h1>
+      <div class="panel"><dl class="kv"><dt>Nom</dt><dd>${esc(me.user.name)}</dd><dt>E-mail</dt><dd>${esc(me.user.email)}</dd><dt>Rôle</dt><dd><b>Administrateur de la plateforme</b></dd></dl></div>
+      <h2>Sécurité</h2>
+      <form id="pwf" class="panel" novalidate><div class="grid2"><label>Mot de passe actuel<input name="current" type="password" autocomplete="current-password"></label><label>Nouveau mot de passe<input name="next" type="password" minlength="8" autocomplete="new-password"></label></div><button class="btn" type="submit">Changer le mot de passe</button></form>
+      <div class="row-actions" style="margin-top:20px"><button class="btn" id="logout">Se déconnecter</button></div>
+      <p class="sign">Dafter · créé par Wassim Khalfalli</p>`);
+    const pwf = document.getElementById('pwf');
+    pwf.onsubmit = e => { e.preventDefault(); guard(pwf.querySelector('button'), async () => { await api('PUT', '/me/password', formData(pwf)); pwf.reset(); toast('Mot de passe changé'); }); };
+    document.getElementById('logout').onclick = async () => { await api('POST', '/auth/logout'); S.me = null; location.hash = '#/connexion'; };
+    return;
+  }
   const users = await api('GET', '/users');
   const stateText = { trial: `Essai Pro jusqu'au ${fdate(sub.ends)}`, active: `Actif jusqu'au ${fdate(sub.ends)}`, free: `${me.invoices_this_month} / ${sub.free_limit} factures utilisées ce mois`, suspended: 'Suspendu' }[sub.state];
   shell('#/parametres', `<h1>Compte</h1>
@@ -769,7 +783,7 @@ async function pageAdmin() {
   const mrr = rows.filter(r => r.sub.state === 'active').reduce((s, r) => s + ((S.me.plans[r.plan]?.price || 0) / (S.me.plans[r.plan]?.months || 1)), 0);
   const label = { trial: 'essai', active: 'Pro', free: 'gratuit', suspended: 'suspendu' };
   const cls = { trial: 'attente', active: 'payee', free: 'partielle', suspended: 'retard' };
-  shell('#/admin', `<h1>Abonnés</h1>
+  shell('#/admin', `<div class="head"><h1>Abonnés</h1><button class="btn primary" id="newco">Inscrire une entreprise</button></div>
     <div class="ledger"><div><div class="k">Entreprises</div><div class="v">${rows.length}</div></div><div><div class="k">Abonnés actifs</div><div class="v">${rows.filter(r => r.sub.state === 'active').length}</div></div>
       <div><div class="k">En essai / gratuits</div><div class="v">${rows.filter(r => r.sub.state === 'trial').length} / ${rows.filter(r => r.sub.state === 'free').length}</div></div><div><div class="k">Revenu mensuel moyen</div><div class="v">${amt(mrr, false)}</div></div></div>
     <h2>Entreprises inscrites</h2>
@@ -781,9 +795,30 @@ async function pageAdmin() {
         <button class="btn small primary" data-a="add_months" data-v="12" data-id="${r.id}" data-plan="annuel">400 DT reçus : +12 mois</button>
         <button class="btn small" data-a="extend_trial" data-v="14" data-id="${r.id}">Essai +14 j</button>
         <button class="btn small" data-a="plan" data-v="${r.plan === 'annuel' ? 'mensuel' : 'annuel'}" data-id="${r.id}">Passer en ${r.plan === 'annuel' ? 'Mensuel' : 'Annuel'}</button>
+        <button class="btn small" data-users="${r.id}" data-name="${esc(r.name)}">Utilisateurs</button>
         ${r.id !== S.me.company.id ? `<button class="btn small danger" data-delco="${r.id}" data-name="${esc(r.name)}">Supprimer</button>` : ''}
         <button class="btn small danger" data-a="status" data-v="${r.status === 'suspended' ? 'active' : 'suspended'}" data-id="${r.id}">${r.status === 'suspended' ? 'Réactiver' : 'Suspendre'}</button>
-      </div></div></div>`).join('')}</div>`);
+      </div></div></div>`).join('') || '<div class="empty">Aucune entreprise inscrite pour le moment.</div>'}</div>`);
+  document.getElementById('newco').onclick = () => modal(`<h2>Inscrire une entreprise</h2><p class="sub">Vous créez le compte puis transmettez l'e-mail et le mot de passe au responsable : il pourra le changer.</p>
+    <form novalidate><label>Nom de l'entreprise<input name="companyName" required></label>
+    <div class="grid2"><label>Nom du responsable<input name="name" required></label><label>Téléphone<input name="phone" type="tel"></label>
+    <label>E-mail de connexion<input name="email" type="email" required></label><label>Mot de passe provisoire<input name="password" type="text" minlength="8" required></label></div>
+    <label>Abonnement<select name="offer"><option value="trial">Essai Pro de 14 jours</option><option value="m1">Pro mensuel déjà payé (40 DT, 1 mois)</option><option value="a12">Pro annuel déjà payé (400 DT, 12 mois)</option></select></label>
+    <div class="row-actions"><button class="btn primary" type="submit">Créer le compte</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form');
+    f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
+      const d = formData(f);
+      await api('POST', '/admin/companies', { ...d, plan: d.offer === 'a12' ? 'annuel' : 'mensuel', months: d.offer === 'a12' ? 12 : d.offer === 'm1' ? 1 : 0 });
+      close(); toast('Entreprise inscrite'); pageAdmin();
+    }); };
+  });
+  document.querySelectorAll('[data-users]').forEach(b => b.onclick = () => guard(b, async () => {
+    const users = await api('GET', `/admin/companies/${b.dataset.users}/users`);
+    modal(`<h2>Utilisateurs · ${esc(b.dataset.name)}</h2><div class="list">${users.map(u => `<div class="item"><div class="main"><div class="t">${esc(u.name)}</div><div class="m">${esc(u.email)} · ${u.role === 'owner' ? 'responsable' : 'membre'} · ${u.last_login ? 'connecté le ' + fdate(u.last_login) : 'jamais connecté'}</div></div><div class="r"><button class="btn small" data-pw="${u.id}" data-n="${esc(u.name)}">Nouveau mot de passe</button></div></div>`).join('')}</div>
+      <div class="row-actions" style="margin-top:12px"><button class="btn" data-close>Fermer</button></div>`, (m, close) => {
+      m.querySelectorAll('[data-pw]').forEach(x => x.onclick = () => { close(); passwordModal(x.dataset.pw, x.dataset.n); });
+    });
+  }));
   document.querySelectorAll('[data-delco]').forEach(b => b.onclick = () => {
     const name = b.dataset.name;
     modal(`<h2>Supprimer ${esc(name)} ?</h2><p>L'entreprise, ses utilisateurs, clients, factures et paiements seront effacés définitivement. Ses utilisateurs ne pourront plus se connecter.</p>
@@ -801,6 +836,38 @@ async function pageAdmin() {
   }));
 }
 
+
+function passwordModal(uid, name) {
+  modal(`<h2>Nouveau mot de passe pour ${esc(name)}</h2><p class="sub">Transmettez-le à la personne : elle pourra le changer dans Compte.</p>
+    <form novalidate><label>Mot de passe (8 caractères minimum)<input name="password" type="text" minlength="8" autocomplete="off"></label>
+    <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le mot de passe</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form');
+    f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { await api('POST', `/admin/users/${uid}/password`, formData(f)); close(); toast('Mot de passe enregistré'); }); };
+  });
+}
+
+async function pageAccess() {
+  if (!S.me.user.is_superadmin) { location.hash = '#/'; return; }
+  loading('#/admin/acces');
+  const admins = await api('GET', '/admin/admins');
+  shell('#/admin/acces', `<div class="head"><h1>Accès</h1><button class="btn primary" id="newadm">Ajouter un administrateur</button></div>
+    <p class="sub" style="margin-top:-6px">Les administrateurs gèrent les abonnements et les accès de toutes les entreprises. Pour les utilisateurs d'une entreprise, ouvrez Abonnés puis « Utilisateurs ».</p>
+    <div class="list">${admins.map(a => `<div class="item"><div class="main"><div class="t">${esc(a.name)}${a.id === S.me.user.id ? ' (vous)' : ''}</div><div class="m">${esc(a.email)} · ${a.protected ? 'administrateur principal' : a.is_platform ? 'administrateur' : 'administrateur, aussi dans ' + esc(a.company_name)} · ${a.last_login ? 'connecté le ' + fdate(a.last_login) : 'jamais connecté'}</div></div>
+      <div class="r">${a.id !== S.me.user.id ? `<button class="btn small" data-pw="${a.id}" data-n="${esc(a.name)}">Mot de passe</button>` : ''}${a.id !== S.me.user.id && !a.protected ? ` <button class="btn small danger" data-rm="${a.id}" data-n="${esc(a.name)}">Retirer</button>` : ''}</div></div>`).join('')}</div>`);
+  document.getElementById('newadm').onclick = () => modal(`<h2>Ajouter un administrateur</h2>
+    <form novalidate><label>Nom<input name="name" required></label><label>E-mail<input name="email" type="email" required></label>
+    <label>Mot de passe provisoire<input name="password" type="text" minlength="8" autocomplete="off"><span class="sub">Laissez vide si la personne a déjà un compte Dafter : elle recevra simplement les droits.</span></label>
+    <div class="row-actions"><button class="btn primary" type="submit">Ajouter l'administrateur</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const f = m.querySelector('form');
+    f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => { const d = formData(f); if (!d.password) delete d.password; await api('POST', '/admin/admins', d); close(); toast('Administrateur ajouté'); pageAccess(); }); };
+  });
+  document.querySelectorAll('[data-pw]').forEach(b => b.onclick = () => passwordModal(b.dataset.pw, b.dataset.n));
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
+    if (!await confirmBox(`Retirer les droits d'administrateur de ${b.dataset.n} ?`, 'Retirer')) return;
+    guard(b, async () => { await api('DELETE', '/admin/admins/' + b.dataset.rm); toast('Administrateur retiré'); pageAccess(); });
+  });
+}
+
 // ---------- routeur ----------
 async function router() {
   const h = (location.hash || '#/').split('?')[0];
@@ -809,6 +876,8 @@ async function router() {
     if (!S.me) return authPage(h === '#/inscription' ? 'register' : 'login');
     if (h === '#/connexion' || h === '#/inscription') { location.hash = '#/'; return; }
     let m;
+    if (S.me.company.is_platform && !['#/admin', '#/admin/acces', '#/parametres'].includes(h)) { location.hash = '#/admin'; return; }
+    if (h === '#/admin/acces') return await pageAccess();
     if (h === '#/' || h === '#') return await pageDashboard();
     if (h === '#/clients') return await pageClients();
     if (h === '#/clients/nouveau') return await pageClientEdit();
