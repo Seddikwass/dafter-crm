@@ -1,0 +1,11 @@
+{
+  "name": "dafter-crm",
+  "version": "1.0.0",
+  "description": "Dafter — CRM pour petites entreprises tunisiennes : clients, factures, échéances, paiements, tableau de bord, abonnements.",
+  "main": "server.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "author": "Wassim Khalfalli",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" }
+}

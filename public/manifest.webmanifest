@@ -1,0 +1,17 @@
+{
+  "name": "Dafter — clients et factures",
+  "short_name": "Dafter",
+  "description": "Suivi des clients, factures, échéances et paiements pour les petites entreprises tunisiennes.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "lang": "fr",
+  "background_color": "#f5f7fb",
+  "theme_color": "#13294b",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
