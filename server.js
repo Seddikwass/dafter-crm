@@ -997,6 +997,13 @@ route('POST', '/api/admin/users/:id/password', { superadmin: true, readOnlyOk: t
   if (!r.rowCount) throw new HttpError(404, 'Utilisateur introuvable');
   return { ok: true };
 });
+route('POST', '/api/admin/test-email', { superadmin: true, readOnlyOk: true }, async (req) => {
+  if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw bad('Clé Brevo ou adresse d\'envoi manquante sur le serveur');
+  try {
+    await sendBrevo({ to: req.user.email, toName: req.user.name, subject: 'Test Dafter : l\'envoi des relances fonctionne', text: `Bonjour ${req.user.name},\n\nCet e-mail confirme que Dafter peut envoyer les relances automatiques de vos abonnés.\n\nDafter`, fromName: 'Dafter' });
+  } catch (e) { throw bad('Envoi refusé : ' + e.message); }
+  return { ok: true, to: req.user.email };
+});
 route('GET', '/api/admin/admins', { superadmin: true, readOnlyOk: true }, async () => {
   const { rows } = await db.query(`SELECT u.id, u.name, u.email, u.last_login, c.is_platform, c.name AS company_name FROM users u JOIN companies c ON c.id = u.company_id WHERE u.is_superadmin ORDER BY u.id`);
   return rows.map(r => ({ ...r, protected: !!SUPERADMIN_EMAIL && r.email === SUPERADMIN_EMAIL }));

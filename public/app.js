@@ -990,8 +990,12 @@ async function pageSettings() {
       <div class="panel"><dl class="kv"><dt>Nom</dt><dd>${esc(me.user.name)}</dd><dt>E-mail</dt><dd>${esc(me.user.email)}</dd><dt>Rôle</dt><dd><b>Administrateur de la plateforme</b></dd></dl></div>
       <h2>Sécurité</h2>
       <form id="pwf" class="panel" novalidate><div class="grid2"><label>Mot de passe actuel<input name="current" type="password" autocomplete="current-password"></label><label>Nouveau mot de passe<input name="next" type="password" minlength="8" autocomplete="new-password"></label></div><button class="btn" type="submit">Changer le mot de passe</button></form>
+      <h2>E-mails de relance</h2>
+      <div class="panel"><p style="margin-top:0">${me.email_ready ? 'L\'envoi d\'e-mails est configuré.' : 'L\'envoi d\'e-mails n\'est pas encore configuré.'}</p><button class="btn" id="testmail" ${me.email_ready ? '' : 'disabled'}>Envoyer un e-mail de test à ${esc(me.user.email)}</button></div>
       <div class="row-actions" style="margin-top:20px"><button class="btn" id="logout">Se déconnecter</button></div>
       <p class="sign">Dafter · créé par Wassim Khalfalli</p>`);
+    const tm = document.getElementById('testmail');
+    tm.onclick = () => guard(tm, async () => { const r = await api('POST', '/admin/test-email'); toast('E-mail de test envoyé à ' + r.to + ' : vérifiez aussi les spams'); });
     const pwf = document.getElementById('pwf');
     pwf.onsubmit = e => { e.preventDefault(); guard(pwf.querySelector('button'), async () => { await api('PUT', '/me/password', formData(pwf)); pwf.reset(); toast('Mot de passe changé'); }); };
     document.getElementById('logout').onclick = async () => { await api('POST', '/auth/logout'); S.me = null; location.hash = '#/connexion'; };
