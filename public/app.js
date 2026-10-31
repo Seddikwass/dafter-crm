@@ -160,8 +160,8 @@ function authPage(mode) {
         <div><span>Café Le Jasmin · payée</span><span>${amt(96.39)}</span></div>
       </div>
       <div class="plans">
-        <div><b>Essentiel</b><span class="p">29 DT</span> / mois<br>2 utilisateurs, 200 clients</div>
-        <div><b>Pro</b><span class="p">59 DT</span> / mois<br>10 utilisateurs, clients illimités</div>
+        <div><b>Mensuel</b><span class="p">175 DT</span> par mois<br>Sans engagement</div>
+        <div><b>Annuel</b><span class="p">2 000 DT</span> par an<br>100 DT d'économie</div>
       </div>
     </section>
     <section class="auth-form">
@@ -545,9 +545,13 @@ async function pageSettings() {
     ${me.user.is_superadmin ? '<div class="banner info"><span>Vous êtes <b>administrateur de la plateforme</b> : vous gérez les abonnements de toutes les entreprises inscrites.</span><a class="btn small primary" href="#/admin">Gérer les abonnés</a></div>' : ''}
     <h2 style="margin-top:0">Abonnement</h2>
     <div class="panel">
-      <dl class="kv"><dt>Formule</dt><dd>${esc(sub.plan_label)} · ${sub.price} DT / mois</dd><dt>État</dt><dd>${stateText}</dd></dl>
-      <div class="plans" style="max-width:none;margin-top:14px">${Object.entries(me.plans).map(([k, p]) => `<div style="border-color:var(--line)${k === sub.plan ? ';outline:2px solid var(--door)' : ''}"><b>${p.label}</b><span class="p" style="font-size:20px">${p.price} DT</span> / mois<br><span class="sub">${p.maxUsers} utilisateurs · ${p.maxClients >= 5000 ? 'clients illimités' : p.maxClients + ' clients'}</span></div>`).join('')}</div>
-      <p style="margin-bottom:0">${me.payment_info ? esc(me.payment_info) : 'Pour activer ou renouveler, réglez par virement ou D17 puis envoyez le reçu : votre accès est prolongé dès réception.'}</p>
+      <dl class="kv"><dt>Formule</dt><dd>${esc(sub.plan_label)} · ${sub.price.toLocaleString('fr-FR')} DT par ${sub.period}</dd><dt>État</dt><dd>${stateText}</dd></dl>
+      <div class="plans" style="max-width:none;margin-top:14px">${Object.entries(me.plans).map(([k, p]) => `<div style="border-color:var(--line)${k === sub.plan ? ';outline:2px solid var(--door)' : ''}"><b>${p.label}${k === sub.plan ? ' · votre formule' : ''}</b><span class="p" style="font-size:20px">${p.price.toLocaleString('fr-FR')} DT</span> par ${p.period}<br><span class="sub">${k === 'annuel' ? `soit ${(p.price / 12).toFixed(0)} DT par mois, 100 DT d'économie` : 'sans engagement'}</span></div>`).join('')}</div>
+      ${me.payment.rib ? `<h2 style="margin-top:18px">Payer par virement ou versement</h2>
+      <dl class="kv">${me.payment.holder ? `<dt>Titulaire</dt><dd>${esc(me.payment.holder)}</dd>` : ''}${me.payment.bank ? `<dt>Banque</dt><dd>${esc(me.payment.bank)}</dd>` : ''}<dt>RIB</dt><dd class="num" style="font-weight:500;word-break:break-all">${esc(me.payment.rib)}</dd>
+        <dt>Motif</dt><dd>Dafter ${esc(c.name)}</dd><dt>Montant</dt><dd>175 DT (1 mois) ou 2 000 DT (1 an)</dd></dl>
+      <div class="row-actions"><button class="btn small" id="copyrib">Copier le RIB</button></div>
+      <p style="margin-bottom:0" class="sub">À la réception du paiement, l'abonnement sera activé.${me.payment.contact ? ` Pour accélérer, envoyez le reçu à <b>${esc(me.payment.contact)}</b>.` : ''}</p>` : `<p style="margin-bottom:0">${me.payment_info ? esc(me.payment_info) : 'Paiement par virement ou versement. À la réception du paiement, l\'abonnement sera activé.'}</p>`}
     </div>
     <h2>Entreprise</h2>
     <form id="cof" class="panel" novalidate>
@@ -574,6 +578,8 @@ async function pageSettings() {
     <p class="sign">Dafter · créé par Wassim Khalfalli</p>`);
   const cof = document.getElementById('cof');
   cof.onsubmit = e => { e.preventDefault(); guard(cof.querySelector('button'), async () => { await api('PUT', '/company', formData(cof)); S.me = await api('GET', '/me'); toast('Informations enregistrées'); document.querySelector('.topbar .co').textContent = S.me.company.name; }); };
+  const cr = document.getElementById('copyrib');
+  if (cr) cr.onclick = async () => { try { await navigator.clipboard.writeText(me.payment.rib); toast('RIB copié'); } catch (_) { toast(me.payment.rib); } };
   const pwf = document.getElementById('pwf');
   pwf.onsubmit = e => { e.preventDefault(); guard(pwf.querySelector('button'), async () => { await api('PUT', '/me/password', formData(pwf)); pwf.reset(); toast('Mot de passe changé'); }); };
   document.getElementById('logout').onclick = async () => { await api('POST', '/auth/logout'); S.me = null; location.hash = '#/connexion'; };
@@ -599,21 +605,21 @@ async function pageAdmin() {
   if (!S.me.user.is_superadmin) { location.hash = '#/'; return; }
   loading('#/admin');
   const rows = await api('GET', '/admin/companies');
-  const mrr = rows.filter(r => r.sub.state === 'active').reduce((s, r) => s + (S.me.plans[r.plan]?.price || 0), 0);
+  const mrr = rows.filter(r => r.sub.state === 'active').reduce((s, r) => s + ((S.me.plans[r.plan]?.price || 0) / (S.me.plans[r.plan]?.months || 1)), 0);
   const label = { trial: 'essai', active: 'actif', expired: 'expiré', suspended: 'suspendu' };
   const cls = { trial: 'attente', active: 'payee', expired: 'retard', suspended: 'retard' };
   shell('#/admin', `<h1>Abonnés</h1>
     <div class="ledger"><div><div class="k">Entreprises</div><div class="v">${rows.length}</div></div><div><div class="k">Abonnés actifs</div><div class="v">${rows.filter(r => r.sub.state === 'active').length}</div></div>
-      <div><div class="k">En essai</div><div class="v">${rows.filter(r => r.sub.state === 'trial').length}</div></div><div><div class="k">Revenu mensuel</div><div class="v">${amt(mrr, false)}</div></div></div>
+      <div><div class="k">En essai</div><div class="v">${rows.filter(r => r.sub.state === 'trial').length}</div></div><div><div class="k">Revenu mensuel moyen</div><div class="v">${amt(mrr, false)}</div></div></div>
     <h2>Entreprises inscrites</h2>
     <div class="list">${rows.map(r => `<div class="item"><div class="main"><div class="t">${esc(r.name)} <span class="tag ${cls[r.sub.state]}">${label[r.sub.state]}</span></div>
       <div class="m">${esc(r.email || '')}${r.phone ? ' · ' + esc(r.phone) : ''} · ${S.me.plans[r.plan]?.label} · jusqu'au ${fdate(r.sub.ends)}</div>
       <div class="m">${r.users} util. · ${r.clients} clients · ${r.invoices} factures · inscrit le ${fdate(r.created_at)}</div>
       <div class="row-actions">
-        <button class="btn small" data-a="add_months" data-v="1" data-id="${r.id}">+1 mois payé</button>
-        <button class="btn small" data-a="add_months" data-v="12" data-id="${r.id}">+12 mois</button>
+        <button class="btn small primary" data-a="add_months" data-v="1" data-id="${r.id}">175 DT reçus : +1 mois</button>
+        <button class="btn small primary" data-a="add_months" data-v="12" data-id="${r.id}" data-plan="annuel">2 000 DT reçus : +12 mois</button>
         <button class="btn small" data-a="extend_trial" data-v="14" data-id="${r.id}">Essai +14 j</button>
-        <button class="btn small" data-a="plan" data-v="${r.plan === 'pro' ? 'essentiel' : 'pro'}" data-id="${r.id}">Passer en ${r.plan === 'pro' ? 'Essentiel' : 'Pro'}</button>
+        <button class="btn small" data-a="plan" data-v="${r.plan === 'annuel' ? 'mensuel' : 'annuel'}" data-id="${r.id}">Passer en ${r.plan === 'annuel' ? 'Mensuel' : 'Annuel'}</button>
         ${r.id !== S.me.company.id ? `<button class="btn small danger" data-delco="${r.id}" data-name="${esc(r.name)}">Supprimer</button>` : ''}
         <button class="btn small danger" data-a="status" data-v="${r.status === 'suspended' ? 'active' : 'suspended'}" data-id="${r.id}">${r.status === 'suspended' ? 'Réactiver' : 'Suspendre'}</button>
       </div></div></div>`).join('')}</div>`);
@@ -630,7 +636,7 @@ async function pageAdmin() {
     });
   });
   document.querySelectorAll('[data-a]').forEach(b => b.onclick = () => guard(b, async () => {
-    await api('POST', '/admin/companies/' + b.dataset.id, { [b.dataset.a]: b.dataset.v }); toast('Abonnement mis à jour'); pageAdmin();
+    await api('POST', '/admin/companies/' + b.dataset.id, { [b.dataset.a]: b.dataset.v, ...(b.dataset.plan ? { plan: b.dataset.plan } : b.dataset.a === 'add_months' ? { plan: 'mensuel' } : {}) }); toast('Abonnement mis à jour'); pageAdmin();
   }));
 }
 

@@ -13,8 +13,8 @@ if (!process.env.DATABASE_URL) { console.error('DATABASE_URL manquant'); process
 const db = new Pool(process.env.DATABASE_URL, Number(process.env.DB_POOL || 5));
 
 const PLANS = {
-  essentiel: { label: 'Essentiel', price: 29, maxUsers: 2, maxClients: 200 },
-  pro: { label: 'Pro', price: 59, maxUsers: 10, maxClients: 5000 },
+  mensuel: { label: 'Mensuel', price: 175, period: 'mois', months: 1, maxUsers: 10, maxClients: 100000 },
+  annuel: { label: 'Annuel', price: 2000, period: 'an', months: 12, maxUsers: 10, maxClients: 100000 },
 };
 const METHODS = ['espèces', 'chèque', 'virement', 'traite', 'carte', 'D17'];
 const TVA_RATES = [0, 7, 13, 19];
@@ -80,7 +80,7 @@ function subscription(c) {
   else if (trialOk) state = 'trial';
   const end = paidOk ? c.paid_until : c.trial_ends;
   const daysLeft = Math.round((Date.parse(end) - Date.parse(t)) / 864e5);
-  return { state, plan: c.plan, plan_label: PLANS[c.plan]?.label || c.plan, price: PLANS[c.plan]?.price, ends: end, days_left: daysLeft, can_write: state === 'active' || state === 'trial' };
+  return { state, plan: c.plan, plan_label: PLANS[c.plan]?.label || c.plan, price: PLANS[c.plan]?.price, period: PLANS[c.plan]?.period, ends: end, days_left: daysLeft, can_write: state === 'active' || state === 'trial' };
 }
 
 // ---------- routeur ----------
@@ -143,6 +143,7 @@ route('GET', '/api/me', async (req) => {
     company: { id: c.id, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer },
     subscription: subscription(c), plans: PLANS, methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
+    payment: { rib: process.env.PAYMENT_RIB || '', holder: process.env.PAYMENT_HOLDER || '', bank: process.env.PAYMENT_BANK || '', contact: process.env.PAYMENT_CONTACT || '' },
   };
 });
 
@@ -185,7 +186,7 @@ route('POST', '/api/users', { owner: true }, async (req, res, b) => {
   if (!name || !isEmail(email)) throw bad('Nom et e-mail valides obligatoires');
   if (!b.password || String(b.password).length < 8) throw bad('Mot de passe de 8 caractères minimum');
   const n = await db.query('SELECT count(*)::int n FROM users WHERE company_id = $1', [req.user.company_id]);
-  const max = PLANS[req.user.plan]?.maxUsers || 2;
+  const max = PLANS[req.user.plan]?.maxUsers || 10;
   if (n.rows[0].n >= max) throw bad(`Votre formule permet ${max} utilisateurs maximum`);
   const ex = await db.query('SELECT 1 FROM users WHERE email = $1', [email]);
   if (ex.rows.length) throw bad('Cet e-mail est déjà utilisé');
@@ -239,8 +240,8 @@ route('GET', '/api/clients/:id', async (req, res, b, p) => {
 });
 route('POST', '/api/clients', async (req, res, b) => {
   const n = await db.query('SELECT count(*)::int n FROM clients WHERE company_id = $1', [req.user.company_id]);
-  const max = PLANS[req.user.plan]?.maxClients || 200;
-  if (n.rows[0].n >= max) throw bad(`Votre formule permet ${max} clients maximum. Passez à la formule Pro.`);
+  const max = PLANS[req.user.plan]?.maxClients || 100000;
+  if (n.rows[0].n >= max) throw bad(`Limite de ${max} clients atteinte.`);
   const { rows } = await db.query(`INSERT INTO clients (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
     [req.user.company_id, ...clientFields(b)]);
   return rows[0];
@@ -503,5 +504,7 @@ const server = http.createServer(async (req, res) => {
     catch (e) { if (i > 10) throw e; console.log('Attente de la base…', e.message); await new Promise(r => setTimeout(r, 3000)); }
   }
   for (const stmt of fs.readFileSync(path.join(__dirname, 'lib/schema.sql'), 'utf8').split(';').map(s => s.trim()).filter(Boolean)) await db.query(stmt);
+  await db.query(`ALTER TABLE companies ALTER COLUMN plan SET DEFAULT 'mensuel'`);
+  await db.query(`UPDATE companies SET plan = 'mensuel' WHERE plan NOT IN ('mensuel', 'annuel')`);
   server.listen(PORT, () => console.log(`CRM prêt sur le port ${PORT}`));
 })().catch(e => { console.error(e); process.exit(1); });
