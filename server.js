@@ -187,7 +187,7 @@ route('GET', '/api/me', async (req) => {
   const c = rows[0];
   return {
     user: { id: u.id, name: u.name, email: u.email, role: u.role, is_superadmin: u.is_superadmin },
-    company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer, reminder_settings: reminderSettings(c) },
+    company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer, legal_form: c.legal_form, capital: c.capital, rc: c.rc, fax: c.fax, postal_code: c.postal_code, slogan: c.slogan, has_logo: !!c.logo, reminder_settings: reminderSettings(c) },
     email_ready: !!process.env.BREVO_API_KEY,
     rs_rates: RS_RATES, subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, purchase_types: PURCHASE_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
@@ -207,8 +207,10 @@ route('PUT', '/api/company', { owner: true, readOnlyOk: true }, async (req, res,
   const name = str(b.name, 120); if (!name) throw bad('Nom obligatoire');
   const due = Math.max(0, Math.min(365, parseInt(b.default_due_days, 10) || 30));
   const prefix = (str(b.invoice_prefix, 10) || 'F').replace(/[^A-Za-z0-9-]/g, '') || 'F';
-  await db.query(`UPDATE companies SET name=$1, matricule_fiscal=$2, address=$3, city=$4, phone=$5, email=$6, invoice_prefix=$7, default_due_days=$8, invoice_footer=$9 WHERE id=$10`,
-    [name, normMF(b.matricule_fiscal), str(b.address, 300), str(b.city, 80), str(b.phone, 40), str(b.email, 160), prefix, due, str(b.invoice_footer, 500), req.user.company_id]);
+  await db.query(`UPDATE companies SET name=$1, matricule_fiscal=$2, address=$3, city=$4, phone=$5, email=$6, invoice_prefix=$7, default_due_days=$8, invoice_footer=$9,
+      legal_form=$10, capital=$11, rc=$12, fax=$13, postal_code=$14, slogan=$15 WHERE id=$16`,
+    [name, normMF(b.matricule_fiscal), str(b.address, 300), str(b.city, 80), str(b.phone, 40), str(b.email, 160), prefix, due, str(b.invoice_footer, 500),
+     str(b.legal_form, 40), str(b.capital, 40), str(b.rc, 40), str(b.fax, 40), str(b.postal_code, 10), str(b.slogan, 120), req.user.company_id]);
   return { ok: true };
 });
 
@@ -225,6 +227,17 @@ route('DELETE', '/api/company', { owner: true, readOnlyOk: true }, async (req, r
   return { ok: true };
 });
 
+route('GET', '/api/company/logo', async (req) => {
+  const { rows } = await db.query('SELECT logo FROM companies WHERE id = $1', [req.user.company_id]);
+  return { logo: rows[0]?.logo || null };
+});
+route('PUT', '/api/company/logo', { owner: true, readOnlyOk: true }, async (req, res, b) => {
+  const logo = b.logo ? String(b.logo) : null;
+  if (logo && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(logo)) throw bad('Image invalide : utilisez un PNG ou un JPEG');
+  if (logo && logo.length > 400000) throw bad('Logo trop lourd : 300 Ko maximum');
+  await db.query('UPDATE companies SET logo = $1 WHERE id = $2', [logo, req.user.company_id]);
+  return { ok: true };
+});
 route('PUT', '/api/company/plan', { owner: true, readOnlyOk: true }, async (req, res, b) => {
   if (!PLANS[b.plan]) throw bad('Formule inconnue');
   await db.query('UPDATE companies SET plan = $1 WHERE id = $2', [b.plan, req.user.company_id]);
@@ -256,7 +269,7 @@ route('DELETE', '/api/users/:id', { owner: true }, async (req, res, b, p) => {
 
 // ---------- clients ----------
 const INVOICE_SELECT = `
-  SELECT i.id, i.client_id, cl.name AS client_name, i.number, i.issue_date, i.due_date, i.total_ht, i.total_tva, i.timbre, i.total_ttc, i.notes, i.created_at,
+  SELECT i.id, i.client_id, cl.name AS client_name, i.number, i.reference, i.issue_date, i.due_date, i.total_ht, i.total_tva, i.timbre, i.total_ttc, i.notes, i.created_at,
     COALESCE(p.paid, 0)::numeric AS paid,
     (i.total_ttc - COALESCE(p.paid, 0))::numeric AS balance,
     CASE WHEN COALESCE(p.paid,0) >= i.total_ttc - 0.0005 THEN 'payee'
@@ -271,7 +284,7 @@ const INVOICE_SELECT = `
 function clientFields(b) {
   const name = str(b.name, 160); if (!name) throw bad('Nom du client obligatoire');
   const email = str(b.email, 160); if (email && !isEmail(email)) throw bad('E-mail du client invalide');
-  return [name, normMF(b.matricule_fiscal), str(b.contact_name, 120), str(b.phone, 40), email, str(b.address, 300), str(b.city, 80), str(b.notes, 2000), str(b.legal_name, 200)];
+  return [name, normMF(b.matricule_fiscal), str(b.contact_name, 120), str(b.phone, 40), email, str(b.address, 300), str(b.city, 80), str(b.notes, 2000), str(b.legal_name, 200), str(b.postal_code, 10)];
 }
 
 route('GET', '/api/clients', async (req) => {
@@ -297,12 +310,12 @@ route('POST', '/api/clients', async (req, res, b) => {
   const n = await db.query('SELECT count(*)::int n FROM clients WHERE company_id = $1', [req.user.company_id]);
   const max = PLANS[req.user.plan]?.maxClients || 100000;
   if (n.rows[0].n >= max) throw bad(`Limite de ${max} clients atteinte.`);
-  const { rows } = await db.query(`INSERT INTO clients (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes, legal_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+  const { rows } = await db.query(`INSERT INTO clients (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes, legal_name, postal_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
     [req.user.company_id, ...clientFields(b)]);
   return rows[0];
 });
 route('PUT', '/api/clients/:id', async (req, res, b, p) => {
-  const r = await db.query(`UPDATE clients SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8, legal_name=$9 WHERE id=$10 AND company_id=$11`,
+  const r = await db.query(`UPDATE clients SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8, legal_name=$9, postal_code=$10 WHERE id=$11 AND company_id=$12`,
     [...clientFields(b), p.id, req.user.company_id]);
   if (!r.rowCount) throw new HttpError(404, 'Client introuvable');
   return { ok: true };
@@ -350,9 +363,9 @@ async function insertInvoice(t, req, b, v, opts = {}) {
   if (!number) number = `${seq.rows[0].invoice_prefix}${year}-${String(seq.rows[0].invoice_seq).padStart(4, '0')}`;
   const dup = await t.query('SELECT 1 FROM invoices WHERE company_id = $1 AND number = $2', [cid, number]);
   if (dup.rows.length) throw bad(`Le numéro ${number} existe déjà`);
-  const { rows } = await t.query(`INSERT INTO invoices (company_id, client_id, number, issue_date, due_date, items, total_ht, total_tva, timbre, total_ttc, notes)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, number`,
-    [cid, b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000)]);
+  const { rows } = await t.query(`INSERT INTO invoices (company_id, client_id, number, issue_date, due_date, items, total_ht, total_tva, timbre, total_ttc, notes, reference)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, number`,
+    [cid, b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000), str(b.reference, 80)]);
   if (!opts.skipStock) await syncStock(t, cid, 'invoice', rows[0].id, v.items, -1, b.issue_date, rows[0].number, req.user.id);
   return rows[0];
 }
@@ -366,9 +379,11 @@ function computeInvoice(b) {
     if (!(qty > 0)) throw bad('Quantité invalide');
     if (!(price >= 0)) throw bad('Prix invalide');
     if (!TVA_RATES.includes(rate)) throw bad('Taux de TVA invalide');
-    const lineHt = r3(qty * price);
+    const remise = Math.max(0, Math.min(100, Number(it.remise) || 0));
+    const lineHt = r3(qty * price * (1 - remise / 100));
     ht += lineHt; tva += r3(lineHt * rate / 100);
     const line = { designation, qty, unit_price: r3(price), tva: rate, total_ht: lineHt };
+    if (remise) line.remise = remise;
     if (it.product_id) line.product_id = Number(it.product_id) || undefined;
     if (it.ref) line.ref = str(it.ref, 40);
     if (it.unit) line.unit = str(it.unit, 20);
@@ -415,8 +430,8 @@ route('PUT', '/api/invoices/:id', async (req, res, b, p) => {
   const dup = await db.query('SELECT 1 FROM invoices WHERE company_id = $1 AND number = $2 AND id <> $3', [cid, number, p.id]);
   if (dup.rows.length) throw bad(`Le numéro ${number} existe déjà`);
   return db.tx(async t => {
-    const r = await t.query(`UPDATE invoices SET client_id=$1, number=$2, issue_date=$3, due_date=$4, items=$5, total_ht=$6, total_tva=$7, timbre=$8, total_ttc=$9, notes=$10 WHERE id=$11 AND company_id=$12`,
-      [b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000), p.id, cid]);
+    const r = await t.query(`UPDATE invoices SET client_id=$1, number=$2, issue_date=$3, due_date=$4, items=$5, total_ht=$6, total_tva=$7, timbre=$8, total_ttc=$9, notes=$10, reference=$11 WHERE id=$12 AND company_id=$13`,
+      [b.client_id, number, b.issue_date, b.due_date, v.items, v.ht, v.tva, v.timbre, v.ttc, str(b.notes, 2000), str(b.reference, 80), p.id, cid]);
     if (!r.rowCount) throw new HttpError(404, 'Facture introuvable');
     const fromBL = await t.query(`SELECT 1 FROM documents WHERE company_id = $1 AND invoice_id = $2 AND type = 'livraison'`, [cid, p.id]);
     if (!fromBL.rows.length) await syncStock(t, cid, 'invoice', Number(p.id), v.items, -1, b.issue_date, number, req.user.id);
@@ -531,7 +546,7 @@ route('POST', '/api/documents/:id/convert', async (req, res, b, p) => {
   if (d.status === 'converti') throw bad('Ce document a déjà été facturé');
   const co = await db.query('SELECT default_due_days FROM companies WHERE id = $1', [cid]);
   const issue = today();
-  const data = { client_id: d.client_id, issue_date: issue, due_date: addDays(issue, co.rows[0].default_due_days), items: d.items, timbre: true,
+  const data = { client_id: d.client_id, issue_date: issue, due_date: addDays(issue, co.rows[0].default_due_days), items: d.items, timbre: true, reference: d.number,
     notes: [`Selon ${DOC_TYPES[d.type].label.toLowerCase()} ${d.number}`, d.notes].filter(Boolean).join('\n') };
   const v = computeInvoice(data);
   return db.tx(async t => {
@@ -635,11 +650,11 @@ route('GET', '/api/suppliers/:id', async (req, res, b, p) => {
   return { supplier: s, purchases };
 });
 route('POST', '/api/suppliers', async (req, res, b) => {
-  const { rows } = await db.query(`INSERT INTO suppliers (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes, legal_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [req.user.company_id, ...clientFields(b)]);
+  const { rows } = await db.query(`INSERT INTO suppliers (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes, legal_name, postal_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`, [req.user.company_id, ...clientFields(b)]);
   return rows[0];
 });
 route('PUT', '/api/suppliers/:id', async (req, res, b, p) => {
-  const r = await db.query(`UPDATE suppliers SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8, legal_name=$9 WHERE id=$10 AND company_id=$11`, [...clientFields(b), p.id, req.user.company_id]);
+  const r = await db.query(`UPDATE suppliers SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8, legal_name=$9, postal_code=$10 WHERE id=$11 AND company_id=$12`, [...clientFields(b), p.id, req.user.company_id]);
   if (!r.rowCount) throw new HttpError(404, 'Fournisseur introuvable');
   return { ok: true };
 });

@@ -263,10 +263,11 @@ function invoiceList(rows, emptyText, emptyAction = '') {
 
 // ---------- lignes de document (factures, devis, bons) ----------
 function lineHtml(l = {}) {
-  return `<div class="line">
+  return `<div class="line" data-ref="${esc(l.ref || '')}">
     <label class="des">Désignation<input name="designation" list="prodlist" value="${esc(l.designation)}" required autocomplete="off"><input type="hidden" name="product_id" value="${esc(l.product_id || '')}"></label>
     <label>Quantité<input name="qty" type="number" inputmode="decimal" step="any" min="0" value="${esc(l.qty ?? 1)}"></label>
     <label>Prix unitaire HT<input name="unit_price" type="number" inputmode="decimal" step="0.001" min="0" value="${esc(l.unit_price)}"></label>
+    <label>Remise %<input name="remise" type="number" inputmode="decimal" step="any" min="0" max="100" value="${esc(l.remise || '')}" placeholder="0"></label>
     <label>TVA<select name="tva">${S.me.tva_rates.map(r => `<option value="${r}" ${Number(l.tva ?? 19) === r ? 'selected' : ''}>${r} %</option>`).join('')}</select></label>
     <button type="button" class="btn small danger rm" aria-label="Retirer la ligne">Retirer</button></div>`;
 }
@@ -279,13 +280,14 @@ function linesBlock(items, products) {
 function lineEditor(f, products, timbreOn = () => false) {
   const lines = f.querySelector('#lines');
   const readLines = () => [...lines.querySelectorAll('.line')].map(l => {
-    const o = { designation: l.querySelector('[name=designation]').value, qty: Number(l.querySelector('[name=qty]').value), unit_price: Number(l.querySelector('[name=unit_price]').value), tva: Number(l.querySelector('[name=tva]').value) };
+    const o = { designation: l.querySelector('[name=designation]').value, qty: Number(l.querySelector('[name=qty]').value), unit_price: Number(l.querySelector('[name=unit_price]').value), remise: Number(l.querySelector('[name=remise]').value) || 0, tva: Number(l.querySelector('[name=tva]').value) };
     const pid = Number(l.querySelector('[name=product_id]').value); if (pid) o.product_id = pid;
+    if (l.dataset.ref) o.ref = l.dataset.ref;
     return o;
   });
   const recalc = () => {
     let ht = 0, tva = 0; const byRate = {};
-    readLines().forEach(l => { const h = Math.round((l.qty || 0) * (l.unit_price || 0) * 1000) / 1000; ht += h; const v = Math.round(h * l.tva / 100 * 1000) / 1000; tva += v; if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + v; });
+    readLines().forEach(l => { const h = Math.round((l.qty || 0) * (l.unit_price || 0) * (1 - (l.remise || 0) / 100) * 1000) / 1000; ht += h; const v = Math.round(h * l.tva / 100 * 1000) / 1000; tva += v; if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + v; });
     const tb = timbreOn() ? 1 : 0;
     f.querySelector('#tot').innerHTML = `<div><span>Total HT</span>${amt(ht)}</div>${Object.entries(byRate).map(([r, v]) => `<div><span>TVA ${r} %</span>${amt(v)}</div>`).join('')}${tb ? `<div><span>Timbre fiscal</span>${amt(1)}</div>` : ''}<div class="grand"><span>Total TTC</span>${amt(ht + tva + tb)}</div>`;
   };
@@ -294,6 +296,7 @@ function lineEditor(f, products, timbreOn = () => false) {
       const line = e.target.closest('.line');
       const p = products.find(x => x.name === e.target.value);
       line.querySelector('[name=product_id]').value = p ? p.id : '';
+      line.dataset.ref = p?.ref || '';
       if (p) { line.querySelector('[name=unit_price]').value = p.unit_price; line.querySelector('[name=tva]').value = p.tva; }
     }
     recalc();
@@ -339,6 +342,7 @@ function clientForm(c = {}) {
       <label>Téléphone<input name="phone" type="tel" value="${esc(c.phone)}" placeholder="98 123 456"></label>
       <label>E-mail<input name="email" type="email" value="${esc(c.email)}"></label>
       <label>Adresse<input name="address" value="${esc(c.address)}"></label>
+      <label>Code postal<input name="postal_code" inputmode="numeric" value="${esc(c.postal_code)}" placeholder="ex. 2070"></label>
       <label>Ville<input name="city" value="${esc(c.city)}"></label>
     </div>
     <label>Notes<textarea name="notes">${esc(c.notes)}</textarea></label>
@@ -432,6 +436,7 @@ async function pageInvoiceEdit(id) {
       <div class="grid2">
         <label>Client<select name="client_id" required><option value="">Choisir…</option>${clients.map(c => `<option value="${c.id}" ${c.id === inv.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
         <label>Numéro<input name="number" value="${esc(inv.number || '')}" placeholder="${id ? '' : 'Automatique'}"></label>
+        <label>Référence (devis, bon de commande du client…)<input name="reference" value="${esc(inv.reference || '')}"></label>
         <label>Date de facture<input name="issue_date" type="date" value="${esc(inv.issue_date)}" required></label>
         <label>Échéance<input name="due_date" type="date" value="${esc(inv.due_date)}" required></label>
       </div>
@@ -448,7 +453,7 @@ async function pageInvoiceEdit(id) {
   const { readLines } = lineEditor(f, products, () => f.elements.timbre.checked);
   f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
     const d = formData(f);
-    const body = { client_id: Number(d.client_id), number: d.number, issue_date: d.issue_date, due_date: d.due_date, timbre: f.elements.timbre.checked, notes: d.notes, items: readLines() };
+    const body = { client_id: Number(d.client_id), number: d.number, reference: d.reference, issue_date: d.issue_date, due_date: d.due_date, timbre: f.elements.timbre.checked, notes: d.notes, items: readLines() };
     const r = id ? await api('PUT', '/invoices/' + id, body) : await api('POST', '/invoices', body);
     toast(id ? 'Facture enregistrée' : `Facture ${r.number} créée`); location.hash = '#/factures/' + (id || r.id);
   }); };
@@ -507,7 +512,7 @@ async function pageInvoice(id) {
     ${inv.status !== 'payee' ? `<h2>Relancer le client</h2>${reminderButtons(inv)}` : ''}
     <h2>Historique des relances</h2>${reminderHistory(inv.reminders)}
     <h2>Lignes</h2>
-    <div class="list">${inv.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}
+    <div class="list">${inv.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)}${l.remise ? ' − ' + l.remise + ' %' : ''} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}
       <div class="item"><div class="main"><div class="m">HT ${plain(inv.total_ht)} · TVA ${plain(inv.total_tva)}${inv.timbre ? ' · timbre ' + plain(inv.timbre) : ''}</div></div><div class="r"><b>${amt(inv.total_ttc)}</b></div></div></div>
     <h2>Paiements reçus</h2>
     <div class="list">${inv.payments.length ? inv.payments.map(p => `<div class="item s-payee"><div class="main"><div class="t">${fdate(p.paid_on)} · ${esc(p.method)}</div><div class="m">${p.reference ? 'réf. ' + esc(p.reference) : 'sans référence'}</div></div><div class="r">${amt(p.amount)}<div><button class="btn small danger" data-delpay="${p.id}">Annuler</button></div></div></div>`).join('') : '<div class="empty">Aucun paiement reçu pour cette facture.</div>'}</div>
@@ -567,31 +572,55 @@ function paymentModal(inv, done) {
   });
 }
 
-function printInvoice(inv, kind, opts = {}) {
-  const co = S.me.company, c = opts.party || inv.client;
-  const K = opts.label ? { label: opts.label } : kind ? S.me.doc_types[kind] : { label: 'Facture' };
+async function printInvoice(inv, kind, opts = {}) {
+  const co = S.me.company, c = opts.party || inv.client || {};
+  if (co.has_logo && S.logo === undefined) { try { S.logo = (await api('GET', '/company/logo')).logo; } catch (_) { S.logo = null; } }
+  const label = opts.label || (kind ? S.me.doc_types[kind].label : 'Facture');
   const qtyOnly = opts.qtyOnly ?? kind === 'livraison';
-  const byRate = {}; inv.items.forEach(l => { if (l.tva) byRate[l.tva] = (byRate[l.tva] || 0) + Math.round(l.total_ht * l.tva / 100 * 1000) / 1000; });
-  document.getElementById('print').innerHTML = `
-    <div class="inv-head">
-      <div><h1>${esc(co.name)}</h1>${co.matricule_fiscal ? `MF : ${esc(co.matricule_fiscal)}<br>` : ''}${esc([co.address, co.city].filter(Boolean).join(', '))}<br>${esc([co.phone, co.email].filter(Boolean).join(' · '))}</div>
-      <div style="text-align:right"><h1>${K.label}</h1>N° <b>${esc(inv.number)}</b><br>Date : ${fdate(inv.issue_date)}${inv.due_date ? `<br>Échéance : ${fdate(inv.due_date)}` : ''}${inv.valid_until ? `<br>${kind === 'devis' ? 'Valable jusqu\'au' : 'Livraison prévue le'} : ${fdate(inv.valid_until)}` : ''}${kind === 'avoir' && inv.invoice_number ? `<br>Sur facture : ${esc(inv.invoice_number)}` : ''}</div>
-    </div>
-    <div class="inv-box" style="margin-left:auto;width:50%"><b>${esc(c.legal_name || c.name)}</b><br>${c.legal_name && c.legal_name !== c.name ? esc(c.name) + '<br>' : ''}${c.matricule_fiscal ? `MF : ${esc(c.matricule_fiscal)}<br>` : ''}${[c.address, c.city].some(Boolean) ? esc([c.address, c.city].filter(Boolean).join(', ')) + '<br>' : ''}${esc(c.phone || '')}</div>
-    ${qtyOnly ? `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Quantité</th></tr></thead>
-    <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td></tr>`).join('')}</tbody></table>
-    <div style="display:flex;justify-content:space-between;margin-top:50px"><span>${opts.sign1 || 'Signature du livreur'}</span><span>${opts.sign2 || 'Signature et cachet du client'}</span></div>` : `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Qté</th><th class="rt">P.U. HT</th><th class="rt">TVA</th><th class="rt">Total HT</th></tr></thead>
-    <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td><td class="rt">${plain(l.unit_price)}</td><td class="rt">${l.tva} %</td><td class="rt">${plain(l.total_ht)}</td></tr>`).join('')}</tbody></table>
-    <div class="inv-tot"><div><span>Total HT</span><span>${plain(inv.total_ht)}</span></div>
-      ${Object.entries(byRate).map(([r, v]) => `<div><span>TVA ${r} %</span><span>${plain(v)}</span></div>`).join('')}
-      ${inv.timbre ? `<div><span>Timbre fiscal</span><span>${plain(inv.timbre)}</span></div>` : ''}
-      <div class="g"><span>Total TTC</span><span>${plain(inv.total_ttc)}</span></div>
-      ${inv.paid > 0 ? `<div><span>Déjà réglé</span><span>${plain(inv.paid)}</span></div><div><b>Reste à payer</b><b>${plain(inv.balance)}</b></div>` : ''}</div>
-    <p class="inv-words">Arrêté${kind === 'facture' || !kind ? 'e la présente facture' : kind === 'devis' ? ' le présent devis' : kind === 'avoir' ? ' le présent avoir' : ' le présent bon'} à la somme de : ${amountWords(inv.total_ttc)}.</p>`}
-    ${inv.notes ? `<p style="white-space:pre-wrap">${esc(inv.notes)}</p>` : ''}
-    <div class="inv-foot">${esc(co.invoice_footer || '')}</div>`;
-  const title = document.title; document.title = `${K.label} ${inv.number}`;
-  window.print(); setTimeout(() => { document.title = title; }, 500);
+  const n3 = v => { const [d, m] = (Math.round((Number(v) || 0) * 1000) / 1000).toFixed(3).split('.'); return d.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ',' + m; };
+  const fd = d => { if (!d) return ''; const [y, m, j] = String(d).slice(0, 10).split('-'); return `${j}/${m}/${y}`; };
+  const byRate = {};
+  (inv.items || []).forEach(l => { const b = byRate[l.tva] || (byRate[l.tva] = { base: 0, tva: 0 }); b.base += l.total_ht; b.tva += Math.round(l.total_ht * l.tva / 100 * 1000) / 1000; });
+  const code = (opts.party ? 'F' : 'C') + String(c.id || 0).padStart(6, '0');
+  const fourth = kind === 'devis' ? ['Validité', fd(inv.valid_until)] : kind === 'commande' ? ['Livraison prévue', fd(inv.valid_until)] : kind === 'avoir' ? ['Sur facture', inv.invoice_number || ''] : inv.due_date ? ['Échéance', fd(inv.due_date)] : null;
+  const ref = inv.reference || inv.supplier_ref || '';
+  const net = inv.paid > 0 && inv.balance != null ? inv.balance : inv.total_ttc;
+  const words = { facture: 'la présente facture', devis: 'le présent devis', avoir: 'le présent avoir' }[kind || 'facture'] || 'le présent bon';
+  const hasRemise = (inv.items || []).some(l => l.remise);
+  const legal = [co.name + (co.legal_form ? ' ' + co.legal_form : ''), co.capital ? 'au capital de ' + co.capital : '', [co.address, [co.postal_code, co.city].filter(Boolean).join(' ')].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+  const contact = [co.phone ? 'Tél. : ' + co.phone : '', co.fax ? 'Fax : ' + co.fax : '', co.email ? 'E-mail : ' + co.email : ''].filter(Boolean).join(' · ');
+  const ids = [co.matricule_fiscal ? 'MF : ' + co.matricule_fiscal : '', co.rc ? 'RC : ' + co.rc : ''].filter(Boolean).join(' · ');
+  document.getElementById('print').innerHTML = `<div class="pv">
+    <div class="pv-logo">${S.logo ? `<img src="${S.logo}" alt="">` : `<div class="pv-coname">${esc(co.name)}</div>`}</div>
+    <div class="pv-client"><div class="pv-code">${code}</div><b>${esc(c.legal_name || c.name || '')}</b>${c.legal_name && c.legal_name !== c.name ? `<div>${esc(c.name)}</div>` : ''}
+      ${c.address ? `<div>${esc(c.address)}</div>` : ''}${c.postal_code || c.city ? `<div>${esc([c.postal_code, (c.city || '').toUpperCase()].filter(Boolean).join(' - '))}</div>` : ''}
+      ${c.matricule_fiscal ? `<div class="pv-mf">${esc(c.matricule_fiscal)}</div>` : ''}</div>
+    <div class="pv-title">${esc(label.toUpperCase())}</div>
+    <table class="pv-box pv-head"><thead><tr><th>Numéro</th><th>Date</th><th>Référence</th>${fourth ? `<th>${fourth[0]}</th>` : ''}</tr></thead>
+      <tbody><tr><td>${esc(inv.number)}</td><td>${fd(inv.issue_date)}</td><td>${esc(ref)}</td>${fourth ? `<td>${esc(fourth[1])}</td>` : ''}</tr></tbody></table>
+    <table class="pv-lines"><thead><tr><th>Référence</th><th>Désignation</th><th class="rt">Qté</th>${qtyOnly ? '' : `<th class="rt">PX Unit</th>${hasRemise ? '<th class="rt">Remise</th>' : ''}<th class="rt">Montant HT</th><th class="rt">TVA</th>`}</tr></thead>
+      <tbody>${(inv.items || []).map(l => `<tr><td class="pv-ref">${esc(l.ref || '')}</td><td>${esc(l.designation)}</td><td class="rt">${Number(l.qty).toFixed(2)}</td>${qtyOnly ? '' : `<td class="rt">${n3(l.unit_price)}</td>${hasRemise ? `<td class="rt">${l.remise ? String(l.remise).replace('.', ',') + ' %' : ''}</td>` : ''}<td class="rt">${n3(l.total_ht)}</td><td class="rt">${l.tva} %</td>`}</tr>`).join('')}</tbody></table>
+    ${inv.notes ? `<div class="pv-notes">${esc(inv.notes)}</div>` : ''}
+    ${qtyOnly ? `<div class="pv-sign2"><div class="pv-box pv-signbox">${opts.sign1 || 'Signature du livreur'}</div><div class="pv-box pv-signbox">${opts.sign2 || 'Signature et cachet du client'}</div></div>` : `
+    <div class="pv-bottom">
+      <table class="pv-box pv-tva"><thead><tr><th class="rt">Base</th><th class="rt">Tx TVA</th><th class="rt">TVA</th></tr></thead>
+        <tbody>${Object.keys(byRate).sort((a, b) => a - b).map(r => `<tr><td class="rt">${n3(byRate[r].base)}</td><td class="rt">${r} %</td><td class="rt">${n3(byRate[r].tva)}</td></tr>`).join('')}
+        <tr class="pv-tot"><td class="rt">${n3(inv.total_ht)}</td><td class="rt">Total</td><td class="rt">${n3(inv.total_tva)}</td></tr></tbody></table>
+      <div class="pv-right">
+        <div class="pv-sums">
+          <table class="pv-box pv-totals"><thead><tr><th>Total HT</th><th>Timbre</th><th>Total TTC</th></tr></thead><tbody><tr><td>${n3(inv.total_ht)}</td><td>${n3(inv.timbre || 0)}</td><td>${n3(inv.total_ttc)}</td></tr></tbody></table>
+          <table class="pv-box pv-net"><thead><tr><th>${inv.paid > 0 ? 'Reste à payer' : 'Net à payer'}</th></tr></thead><tbody><tr><td><b>${n3(net)}</b></td></tr></tbody></table>
+        </div>
+        ${inv.paid > 0 ? `<div class="pv-paid">Déjà réglé : ${n3(inv.paid)} DT</div>` : ''}
+        <div class="pv-box pv-words"><div>Arrêté${words.startsWith('la') ? 'e' : ''} ${words} à la somme de :</div><p>${amountWords(inv.total_ttc)}</p><div class="pv-cachet">Cachet et signature</div></div>
+      </div>
+    </div>`}
+    <div class="pv-foot">${co.slogan ? `<div class="pv-slogan">${esc(co.slogan)}</div>` : ''}<div>${esc(legal)}</div>${contact ? `<div>${esc(contact)}</div>` : ''}${ids ? `<div>${esc(ids)}</div>` : ''}${co.invoice_footer ? `<div>${esc(co.invoice_footer)}</div>` : ''}</div>
+  </div>`;
+  const title = document.title; document.title = `${label} ${inv.number}`;
+  const img = document.querySelector('#print img');
+  const go = () => { window.print(); setTimeout(() => { document.title = title; }, 500); };
+  if (img && !img.complete) { img.onload = go; img.onerror = go; } else go();
 }
 
 
@@ -673,7 +702,7 @@ async function pageDoc(id) {
     </div>
     ${d.client?.phone && d.type === 'devis' ? `<div class="row-actions"><a class="btn small wa" target="_blank" rel="noopener" href="https://wa.me/${phoneIntl(d.client.phone)}?text=${encodeURIComponent(`Bonjour, voici notre devis ${d.number} d'un montant de ${plain(d.total_ttc)}. N'hésitez pas à nous contacter pour toute question. Cordialement, ${S.me.company.name}`)}">Envoyer par WhatsApp</a></div>` : ''}
     <h2>Lignes</h2>
-    <div class="list">${d.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}</div>
+    <div class="list">${d.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)}${l.remise ? ' − ' + l.remise + ' %' : ''} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}</div>
     ${d.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(d.notes)}</div>` : ''}
     <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer</button></div>`);
   document.getElementById('print-btn').onclick = () => printInvoice(d, d.type);
@@ -740,7 +769,7 @@ function supplierModal(sp = {}, done) {
     <div class="grid2"><label>Nom du fournisseur (usuel)<input name="name" required value="${esc(sp.name)}"></label>
     <label>Raison sociale<input name="legal_name" value="${esc(sp.legal_name)}"></label><label>Matricule fiscal<input name="matricule_fiscal" value="${esc(sp.matricule_fiscal)}"></label><label>Contact<input name="contact_name" value="${esc(sp.contact_name)}"></label>
     <label>Téléphone<input name="phone" type="tel" value="${esc(sp.phone)}"></label><label>E-mail<input name="email" type="email" value="${esc(sp.email)}"></label>
-    <label>Adresse<input name="address" value="${esc(sp.address)}"></label><label>Ville<input name="city" value="${esc(sp.city)}"></label></div>
+    <label>Adresse<input name="address" value="${esc(sp.address)}"></label><label>Code postal<input name="postal_code" value="${esc(sp.postal_code)}"></label><label>Ville<input name="city" value="${esc(sp.city)}"></label></div>
     <label>Notes<textarea name="notes">${esc(sp.notes)}</textarea></label>
     <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le fournisseur</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
     const f = m.querySelector('form');
@@ -830,7 +859,7 @@ async function pagePurchase(id) {
       ${!locked ? `<a class="btn" href="#/achat/${d.id}/modifier">Modifier</a>` : ''}
     </div>
     <h2>Lignes</h2>
-    <div class="list">${d.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}</div>
+    <div class="list">${d.items.map(l => `<div class="item"><div class="main"><div class="t">${esc(l.designation)}</div><div class="m">${l.qty} × ${plain(l.unit_price)}${l.remise ? ' − ' + l.remise + ' %' : ''} · TVA ${l.tva} %</div></div><div class="r">${amt(l.total_ht)}</div></div>`).join('')}</div>
     ${d.type === 'facture' ? `<h2>Paiements faits</h2><div class="list">${d.payments.length ? d.payments.map(p => `<div class="item s-payee"><div class="main"><div class="t">${fdate(p.paid_on)} · ${esc(p.method)}</div><div class="m">${p.reference ? 'réf. ' + esc(p.reference) : 'sans référence'}</div></div><div class="r">${amt(p.amount)}<div><button class="btn small danger" data-delpay="${p.id}">Annuler</button></div></div></div>`).join('') : '<div class="empty">Aucun paiement fait pour cette facture.</div>'}</div>` : ''}
     ${d.notes ? `<h2>Notes</h2><div class="panel" style="white-space:pre-wrap">${esc(d.notes)}</div>` : ''}
     <div class="row-actions" style="margin-top:20px"><button class="btn danger" id="del">Supprimer</button></div>`);
@@ -1023,13 +1052,24 @@ async function pageSettings() {
       <p style="margin-bottom:0" class="sub">À la réception du paiement, l'abonnement sera activé.${me.payment.contact ? ` Pour accélérer, envoyez le reçu à <b>${esc(me.payment.contact)}</b>.` : ''}</p>` : `<p style="margin-bottom:0">${me.payment_info ? esc(me.payment_info) : 'Paiement par virement ou versement. À la réception du paiement, l\'abonnement sera activé.'}</p>`}
     </div>
     <h2>Entreprise</h2>
-    <form id="cof" class="panel" novalidate>
+    <div class="panel logo-panel">
+      <div class="logo-prev" id="logoprev">${c.has_logo ? '' : '<span class="sub">Aucun logo</span>'}</div>
+      <div><b>Logo</b><p class="sub" style="margin:2px 0 8px">Imprimé en haut de vos factures, devis et bons. PNG ou JPEG.</p>
+      ${owner ? `<label class="btn small" style="margin:0;display:inline-flex">Choisir une image<input type="file" id="logofile" accept="image/png,image/jpeg,image/webp" hidden></label>${c.has_logo ? ' <button type="button" class="btn small danger" id="logodel">Retirer</button>' : ''}` : ''}</div>
+    </div>
+    <form id="cof" class="panel" novalidate style="margin-top:12px">
       <div class="grid2">
-        <label>Nom de l'entreprise<input name="name" value="${esc(c.name)}" ${owner ? '' : 'disabled'}></label>
-        <label>Matricule fiscal<input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" ${owner ? '' : 'disabled'}></label>
+        <label>Raison sociale<input name="name" value="${esc(c.name)}" ${owner ? '' : 'disabled'}></label>
+        <label>Forme juridique<input name="legal_form" list="forms" value="${esc(c.legal_form)}" placeholder="SARL, SA, SUARL…" ${owner ? '' : 'disabled'}><datalist id="forms"><option>SARL</option><option>SUARL</option><option>SA</option><option>SAS</option><option>Personne physique</option></datalist></label>
+        <label>Capital<input name="capital" value="${esc(c.capital)}" placeholder="ex. 10 000 DT" ${owner ? '' : 'disabled'}></label>
+        <label>Matricule fiscal<input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567A/A/M/000" ${owner ? '' : 'disabled'}></label>
+        <label>Registre de commerce<input name="rc" value="${esc(c.rc)}" placeholder="ex. B0123456789" ${owner ? '' : 'disabled'}></label>
+        <label>Activité ou slogan (pied de facture)<input name="slogan" value="${esc(c.slogan)}" ${owner ? '' : 'disabled'}></label>
         <label>Adresse<input name="address" value="${esc(c.address)}" ${owner ? '' : 'disabled'}></label>
+        <label>Code postal<input name="postal_code" value="${esc(c.postal_code)}" ${owner ? '' : 'disabled'}></label>
         <label>Ville<input name="city" value="${esc(c.city)}" ${owner ? '' : 'disabled'}></label>
         <label>Téléphone<input name="phone" value="${esc(c.phone)}" ${owner ? '' : 'disabled'}></label>
+        <label>Fax<input name="fax" value="${esc(c.fax)}" ${owner ? '' : 'disabled'}></label>
         <label>E-mail<input name="email" value="${esc(c.email)}" ${owner ? '' : 'disabled'}></label>
         <label>Préfixe des numéros de facture<input name="invoice_prefix" value="${esc(c.invoice_prefix)}" ${owner ? '' : 'disabled'}></label>
         <label>Délai de paiement par défaut (jours)<input name="default_due_days" type="number" min="0" max="365" value="${c.default_due_days}" ${owner ? '' : 'disabled'}></label>
@@ -1052,6 +1092,16 @@ async function pageSettings() {
     <div class="row-actions" style="margin-top:20px">${me.user.is_superadmin ? '<a class="btn" href="#/admin">Gérer les abonnés</a>' : ''}<button class="btn" id="logout">Se déconnecter</button></div>
     ${owner ? `<h2>Fermer le compte</h2><div class="panel"><p style="margin-top:0">Supprime définitivement votre entreprise, ses utilisateurs, clients, factures et paiements.</p><button class="btn danger" id="delco">Supprimer mon compte</button></div>` : ''}
     <p class="sign">Dafter · créé par Wassim Khalfalli</p>`);
+  if (c.has_logo) api('GET', '/company/logo').then(r => { if (r.logo) document.getElementById('logoprev').innerHTML = `<img src="${r.logo}" alt="Logo">`; S.logo = r.logo; }).catch(() => {});
+  const lf = document.getElementById('logofile');
+  if (lf) lf.onchange = () => { const file = lf.files[0]; if (!file) return; const img = new Image(); const url = URL.createObjectURL(file);
+    img.onload = () => { const max = 500, k = Math.min(1, max / Math.max(img.width, img.height)); const cv = document.createElement('canvas'); cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; if (file.type === 'image/jpeg') ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      let data = cv.toDataURL('image/png'); if (data.length > 380000) data = cv.toDataURL('image/jpeg', 0.85);
+      URL.revokeObjectURL(url); guard(null, async () => { await api('PUT', '/company/logo', { logo: data }); S.logo = data; toast('Logo enregistré'); pageSettings(); }); };
+    img.onerror = () => toast('Image illisible', true); img.src = url; };
+  const ld = document.getElementById('logodel');
+  if (ld) ld.onclick = () => guard(ld, async () => { await api('PUT', '/company/logo', { logo: null }); S.logo = null; toast('Logo retiré'); pageSettings(); });
   const cof = document.getElementById('cof');
   cof.onsubmit = e => { e.preventDefault(); guard(cof.querySelector('button'), async () => { await api('PUT', '/company', formData(cof)); S.me = await api('GET', '/me'); toast('Informations enregistrées'); document.querySelector('.topbar .co').textContent = S.me.company.name; }); };
   document.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => guard(b, async () => { await api('PUT', '/company/plan', { plan: b.dataset.plan }); toast(b.dataset.plan === 'annuel' ? 'Formule annuelle choisie : 400 DT par an' : 'Formule mensuelle choisie : 40 DT par mois'); pageSettings(); }));
