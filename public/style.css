@@ -341,3 +341,9 @@ h2 { color: var(--ink); }
 @media print { #print .pv { page-break-inside: auto; } .pv-lines tr { page-break-inside: avoid; } }
 
 @media print { #print .pv-foot { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; margin: 0; } #print .pv { padding-bottom: 120px; } }
+
+.issuer { background: #e6efff; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 14px; }
+.picker { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.picker .btn { min-height: 44px; }
+.clcard { margin: 8px 0 14px; padding: 8px 12px; border-left: 3px solid var(--sea); background: var(--wash); border-radius: 0 8px 8px 0; font-size: 14px; line-height: 1.5; }
+.modal .grid2 { gap: 0 12px; }

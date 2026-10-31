@@ -332,9 +332,8 @@ async function pageClients() {
   const q = document.getElementById('q'); if (q) q.oninput = () => draw(q.value);
 }
 
-function clientForm(c = {}) {
-  return `<form id="cf" novalidate>
-    <div class="grid2">
+function clientFieldsHtml(c = {}) {
+  return `<div class="grid2">
       <label>Nom du client (usuel)<input name="name" required value="${esc(c.name)}" placeholder="ex. Café Le Jasmin"></label>
       <label>Raison sociale (sur les factures)<input name="legal_name" value="${esc(c.legal_name)}" placeholder="ex. Société Jasmin SARL"></label>
       <label>Matricule fiscal<input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567A/A/M/000"></label>
@@ -345,9 +344,41 @@ function clientForm(c = {}) {
       <label>Code postal<input name="postal_code" inputmode="numeric" value="${esc(c.postal_code)}" placeholder="ex. 2070"></label>
       <label>Ville<input name="city" value="${esc(c.city)}"></label>
     </div>
-    <label>Notes<textarea name="notes">${esc(c.notes)}</textarea></label>
+    <label>Notes<textarea name="notes">${esc(c.notes)}</textarea></label>`;
+}
+function clientForm(c = {}) {
+  return `<form id="cf" novalidate>${clientFieldsHtml(c)}
     <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le client</button><a class="btn" href="${c.id ? '#/clients/' + c.id : '#/clients'}">Annuler</a></div>
   </form>`;
+}
+// Bloc « émetteur + client » des factures, devis et bons : le client se choisit parmi les fiches, ou se crée sur place.
+function partyBlock(clients, selected, locked) {
+  const co = S.me.company;
+  return `<div class="issuer"><span class="sub">Émise par</span> <b>${esc(co.name)}</b>${co.matricule_fiscal ? ` <span class="sub">· MF ${esc(co.matricule_fiscal)}</span>` : ''} <a href="#/parametres" class="sub">modifier</a></div>
+    <div class="picker"><label style="flex:1;margin:0">Client (fiche client)<select name="client_id" required ${locked ? 'disabled' : ''}><option value="">Choisir un client…</option>${clients.map(c => `<option value="${c.id}" ${c.id === selected ? 'selected' : ''}>${esc(c.name)}${c.legal_name && c.legal_name !== c.name ? ' · ' + esc(c.legal_name) : ''}</option>`).join('')}</select></label>
+    ${locked ? '' : '<button type="button" class="btn" id="newcl">+ Nouveau client</button>'}</div>
+    <div class="clcard" id="clcard"></div>`;
+}
+function bindPartyBlock(f, clients) {
+  const sel = f.elements.client_id, card = f.querySelector('#clcard');
+  const show = () => {
+    const c = clients.find(x => x.id === Number(sel.value));
+    card.innerHTML = c ? `<b>${esc(c.legal_name || c.name)}</b>${c.legal_name && c.legal_name !== c.name ? ` <span class="sub">(${esc(c.name)})</span>` : ''}<br>
+      <span class="sub">${esc([c.matricule_fiscal ? 'MF ' + c.matricule_fiscal : 'matricule fiscal non renseigné', [c.address, [c.postal_code, c.city].filter(Boolean).join(' ')].filter(Boolean).join(', ')].filter(Boolean).join(' · '))}</span>
+      <a href="#/clients/${c.id}" class="sub">Voir la fiche</a>` : '<span class="sub">Choisissez une fiche client, ou créez-la avec « + Nouveau client ».</span>';
+  };
+  sel.addEventListener('change', show); show();
+  const nb = f.querySelector('#newcl');
+  if (nb) nb.onclick = () => modal(`<h2>Nouvelle fiche client</h2><form novalidate>${clientFieldsHtml({})}
+      <div class="row-actions"><button class="btn primary" type="submit">Créer et lier à ce document</button><button type="button" class="btn" data-close>Annuler</button></div></form>`, (m, close) => {
+    const cf = m.querySelector('form');
+    cf.onsubmit = e => { e.preventDefault(); guard(cf.querySelector('[type=submit]'), async () => {
+      const data = formData(cf); const r = await api('POST', '/clients', data);
+      const c = (await api('GET', '/clients/' + r.id)).client; clients.push(c);
+      sel.insertAdjacentHTML('beforeend', `<option value="${c.id}">${esc(c.name)}${c.legal_name ? ' · ' + esc(c.legal_name) : ''}</option>`);
+      sel.value = c.id; show(); close(); toast('Fiche client créée et liée');
+    }); };
+  });
 }
 async function pageClientEdit(id) {
   loading('#/clients');
@@ -420,9 +451,6 @@ async function pageInvoices() {
 async function pageInvoiceEdit(id) {
   loading('#/factures');
   const clients = await api('GET', '/clients');
-  if (!clients.length) {
-    shell('#/factures', `<h1>Nouvelle facture</h1><div class="list"><div class="empty">Ajoutez d'abord un client pour pouvoir le facturer.<br><a class="btn primary" href="#/clients/nouveau">Ajouter un client</a></div></div>`); return;
-  }
   const t = S.me.today;
   const preClient = new URLSearchParams(location.hash.split('?')[1] || '').get('client');
   const inv = id ? await api('GET', '/invoices/' + id) : {
@@ -433,8 +461,8 @@ async function pageInvoiceEdit(id) {
   shell('#/factures', `<a class="back" href="${id ? '#/factures/' + id : '#/factures'}">‹ Retour</a>
     <h1>${id ? 'Modifier la facture ' + esc(inv.number) : 'Nouvelle facture'}</h1>
     <form id="if" class="panel" novalidate>
+      ${partyBlock(clients, inv.client_id)}
       <div class="grid2">
-        <label>Client<select name="client_id" required><option value="">Choisir…</option>${clients.map(c => `<option value="${c.id}" ${c.id === inv.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
         <label>Numéro<input name="number" value="${esc(inv.number || '')}" placeholder="${id ? '' : 'Automatique'}"></label>
         <label>Référence (devis, bon de commande du client…)<input name="reference" value="${esc(inv.reference || '')}"></label>
         <label>Date de facture<input name="issue_date" type="date" value="${esc(inv.issue_date)}" required></label>
@@ -450,6 +478,7 @@ async function pageInvoiceEdit(id) {
   const f = document.getElementById('if');
   const issue = f.elements.issue_date, due = f.elements.due_date;
   if (!id) issue.onchange = () => { due.value = addDays(issue.value, S.me.company.default_due_days); };
+  bindPartyBlock(f, clients);
   const { readLines } = lineEditor(f, products, () => f.elements.timbre.checked);
   f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
     const d = formData(f);
@@ -668,7 +697,6 @@ async function pageDocs(type) {
 async function pageDocEdit(type, id) {
   loading('#/factures');
   const [clients, products] = await Promise.all([api('GET', '/clients'), api('GET', '/products')]);
-  if (!clients.length) { shell('#/factures', `<h1>${DOC_NEW[type]}</h1><div class="list"><div class="empty">Ajoutez d'abord un client.<br><a class="btn primary" href="#/clients/nouveau">Ajouter un client</a></div></div>`); return; }
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   let d = id ? await api('GET', '/documents/' + id) : { client_id: Number(params.get('client')) || '', issue_date: S.me.today, valid_until: type === 'devis' ? addDays(S.me.today, 30) : '', items: [], notes: '' };
   if (id) type = d.type;
@@ -682,8 +710,8 @@ async function pageDocEdit(type, id) {
     <h1>${id ? 'Modifier ' + esc(d.number) : DOC_NEW[type]}</h1>
     ${inv ? `<div class="banner info">Sur la facture ${esc(inv.number)} · reste à payer ${plain(inv.balance)}. Ajustez les lignes pour ne garder que le montant à annuler : il sera déduit de la facture.</div>` : ''}
     <form id="df" class="panel" novalidate>
+      ${partyBlock(clients, d.client_id, !!inv)}
       <div class="grid2">
-        <label>Client<select name="client_id" required ${inv ? 'disabled' : ''}><option value="">Choisir…</option>${clients.map(c => `<option value="${c.id}" ${c.id === d.client_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
         <label>Date<input name="issue_date" type="date" value="${esc(d.issue_date)}" required></label>
         ${type === 'devis' || type === 'commande' ? `<label>${type === 'devis' ? 'Valable jusqu\'au' : 'Livraison prévue le'}<input name="valid_until" type="date" value="${esc(d.valid_until || '')}"></label>` : ''}
       </div>
@@ -693,6 +721,7 @@ async function pageDocEdit(type, id) {
       <div class="row-actions"><button class="btn primary" type="submit">${id ? 'Enregistrer les modifications' : 'Créer'}</button><a class="btn" href="${back}">Annuler</a></div>
     </form>`);
   const f = document.getElementById('df');
+  bindPartyBlock(f, clients);
   const { readLines } = lineEditor(f, products);
   f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
     const x = formData(f);
