@@ -152,7 +152,7 @@ function loading(active) { shell(active, '<p class="sub">Chargement…</p>'); }
 // ---------- connexion / inscription ----------
 function authPage(mode) {
   const reg = mode === 'register';
-  root.innerHTML = `<div class="auth">
+  root.innerHTML = `<div class="auth${reg ? '' : ' login'}">
     <section class="auth-side">
       <div class="brand">Dafter</div>
       <h1>Qui vous doit quoi, et pour quand.</h1>
@@ -206,12 +206,12 @@ function barChart(months) {
   months.forEach((m, i) => {
     const x = pl + i * step + step / 2;
     const h1 = (H - pb - 6) * m.invoiced / max, h2 = (H - pb - 6) * m.collected / max;
-    g += `<rect x="${x - bw - 1}" y="${H - pb - h1}" width="${bw}" height="${h1}" rx="2" fill="#13294b"><title>Facturé ${plain(m.invoiced)}</title></rect>`;
-    g += `<rect x="${x + 1}" y="${H - pb - h2}" width="${bw}" height="${h2}" rx="2" fill="#6fa0d8"><title>Encaissé ${plain(m.collected)}</title></rect>`;
+    g += `<rect x="${x - bw - 1}" y="${H - pb - h1}" width="${bw}" height="${h1}" rx="2" fill="#1769d6"><title>Facturé ${plain(m.invoiced)}</title></rect>`;
+    g += `<rect x="${x + 1}" y="${H - pb - h2}" width="${bw}" height="${h2}" rx="2" fill="#0fa89a"><title>Encaissé ${plain(m.collected)}</title></rect>`;
     g += `<text x="${x}" y="${H - 6}" text-anchor="middle">${MONTHS[Number(m.month.slice(5)) - 1]}</text>`;
   });
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Facturé et encaissé sur 12 mois">${g}</svg>
-    <div class="legend"><span><i style="background:#13294b"></i>Facturé</span><span><i style="background:#6fa0d8"></i>Encaissé</span><span>max ${plain(max)}</span></div>`;
+    <div class="legend"><span><i style="background:#1769d6"></i>Facturé</span><span><i style="background:#0fa89a"></i>Encaissé</span><span>max ${plain(max)}</span></div>`;
 }
 
 async function pageDashboard() {
@@ -219,7 +219,7 @@ async function pageDashboard() {
   const [d, al] = await Promise.all([api('GET', '/dashboard'), api('GET', '/alerts')]);
   S.alertsCount = al.overdue.length;
   const a = d.aging; const agingMax = Math.max(1, a.not_due, a.d30, a.d60, a.d90, a.d90plus);
-  const bars = [['Pas encore dû', a.not_due, '#6fa0d8'], ['1 à 30 jours', a.d30, '#d9a23a'], ['31 à 60 jours', a.d60, '#d77a3a'], ['61 à 90 jours', a.d90, '#c4473a'], ['Plus de 90 jours', a.d90plus, '#8f1d16']];
+  const bars = [['Pas encore dû', a.not_due, '#0fa89a'], ['1 à 30 jours', a.d30, '#f2a900'], ['31 à 60 jours', a.d60, '#ef7d22'], ['61 à 90 jours', a.d90, '#d9402f'], ['Plus de 90 jours', a.d90plus, '#9b1c12']];
   const firstName = S.me.user.name.split(' ')[0];
   const isEmpty = !d.clients;
   shell('#/', `

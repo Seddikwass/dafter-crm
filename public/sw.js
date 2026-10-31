@@ -1,5 +1,5 @@
 // Réseau d'abord pour tout ; cache de secours pour l'interface hors ligne.
-const C = 'dafter-v2';
+const C = 'dafter-v3';
 const SHELL = ['/', '/style.css', '/app.js', '/icon.svg', '/manifest.webmanifest'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(C).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x !== C).map(x => caches.delete(x))))); self.clients.claim(); });
