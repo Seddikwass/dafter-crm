@@ -23,7 +23,20 @@ const DOC_TYPES = {
   livraison: { label: 'Bon de livraison', prefix: 'BL' },
   avoir: { label: 'Avoir', prefix: 'AV' },
 };
-const METHODS = ['espèces', 'chèque', 'virement', 'traite', 'carte', 'D17'];
+const METHODS = ['espèces', 'chèque', 'virement', 'traite', 'carte', 'D17', 'retenue à la source'];
+const RS_RATES = [0.5, 1, 1.5, 3, 5, 10, 15, 25];
+// Matricule fiscal tunisien : 7 chiffres + lettre de contrôle, puis code TVA / catégorie / n° d'établissement (ex. 1234567/A/M/000).
+function normMF(v) {
+  const raw = str(v, 40); if (!raw) return null;
+  const x = raw.toUpperCase().replace(/[\s.\-]/g, '');
+  let m = x.match(/^(\d{7})\/?([A-Z])\/?([A-Z])\/?([A-Z])\/?(\d{3})$/);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}/${m[4]}/${m[5]}`.replace(/^(\d{7})\/([A-Z])/, '$1$2');
+  m = x.match(/^(\d{7})\/?([A-Z])\/?([A-Z])\/?(\d{3})$/);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}/${m[4]}`;
+  m = x.match(/^(\d{7})\/?([A-Z])$/);
+  if (m) return m[1] + m[2];
+  throw bad('Matricule fiscal invalide. Exemples acceptés : 1234567A/A/M/000, 1234567/A/M/000 ou 1234567A');
+}
 const PURCHASE_TYPES = {
   commande: { label: 'Commande fournisseur', prefix: 'CF' },
   reception: { label: 'Bon de réception', prefix: 'BR' },
@@ -145,7 +158,7 @@ route('POST', '/api/auth/register', { public: true }, async (req, res, b) => {
       return u.rows[0];
     }
     const c = await t.query(`INSERT INTO companies (name, phone, email, matricule_fiscal, trial_ends) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-      [companyName, str(b.phone, 40), email, str(b.matricule_fiscal, 40), addDays(today(), TRIAL_DAYS)]);
+      [companyName, str(b.phone, 40), email, normMF(b.matricule_fiscal), addDays(today(), TRIAL_DAYS)]);
     const u = await t.query(`INSERT INTO users (company_id, name, email, password_hash, role, is_superadmin) VALUES ($1,$2,$3,$4,'owner',$5) RETURNING id`,
       [c.rows[0].id, name, email, hashPassword(String(b.password)), !!SUPERADMIN_EMAIL && email === SUPERADMIN_EMAIL]);
     return u.rows[0];
@@ -176,7 +189,7 @@ route('GET', '/api/me', async (req) => {
     user: { id: u.id, name: u.name, email: u.email, role: u.role, is_superadmin: u.is_superadmin },
     company: { id: c.id, is_platform: c.is_platform, name: c.name, matricule_fiscal: c.matricule_fiscal, address: c.address, city: c.city, phone: c.phone, email: c.email, invoice_prefix: c.invoice_prefix, default_due_days: c.default_due_days, invoice_footer: c.invoice_footer, reminder_settings: reminderSettings(c) },
     email_ready: !!process.env.BREVO_API_KEY,
-    subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, purchase_types: PURCHASE_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
+    rs_rates: RS_RATES, subscription: subscription(c), plans: PLANS, free: FREE, doc_types: DOC_TYPES, purchase_types: PURCHASE_TYPES, invoices_this_month: await invoicesThisMonth(c.id), methods: METHODS, tva_rates: TVA_RATES, today: today(),
     payment_info: process.env.PAYMENT_INFO || '',
     payment: { rib: process.env.PAYMENT_RIB || '', holder: process.env.PAYMENT_HOLDER || '', bank: process.env.PAYMENT_BANK || '', contact: process.env.PAYMENT_CONTACT || '' },
   };
@@ -195,7 +208,7 @@ route('PUT', '/api/company', { owner: true, readOnlyOk: true }, async (req, res,
   const due = Math.max(0, Math.min(365, parseInt(b.default_due_days, 10) || 30));
   const prefix = (str(b.invoice_prefix, 10) || 'F').replace(/[^A-Za-z0-9-]/g, '') || 'F';
   await db.query(`UPDATE companies SET name=$1, matricule_fiscal=$2, address=$3, city=$4, phone=$5, email=$6, invoice_prefix=$7, default_due_days=$8, invoice_footer=$9 WHERE id=$10`,
-    [name, str(b.matricule_fiscal, 40), str(b.address, 300), str(b.city, 80), str(b.phone, 40), str(b.email, 160), prefix, due, str(b.invoice_footer, 500), req.user.company_id]);
+    [name, normMF(b.matricule_fiscal), str(b.address, 300), str(b.city, 80), str(b.phone, 40), str(b.email, 160), prefix, due, str(b.invoice_footer, 500), req.user.company_id]);
   return { ok: true };
 });
 
@@ -252,7 +265,7 @@ const INVOICE_SELECT = `
 function clientFields(b) {
   const name = str(b.name, 160); if (!name) throw bad('Nom du client obligatoire');
   const email = str(b.email, 160); if (email && !isEmail(email)) throw bad('E-mail du client invalide');
-  return [name, str(b.matricule_fiscal, 40), str(b.contact_name, 120), str(b.phone, 40), email, str(b.address, 300), str(b.city, 80), str(b.notes, 2000)];
+  return [name, normMF(b.matricule_fiscal), str(b.contact_name, 120), str(b.phone, 40), email, str(b.address, 300), str(b.city, 80), str(b.notes, 2000)];
 }
 
 route('GET', '/api/clients', async (req) => {
@@ -835,6 +848,38 @@ route('POST', '/api/reminders/run', async (req) => {
   return { sent: n };
 });
 
+// ---------- rapports & déclaration mensuelle ----------
+route('GET', '/api/reports/monthly', async (req) => {
+  const cid = req.user.company_id;
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : today().slice(0, 7);
+  const from = month + '-01', to = addMonths(from, 1);
+  const byRate = (table, extra) => db.query(`SELECT (it->>'tva')::int AS rate, SUM((it->>'total_ht')::numeric) AS ht, SUM(round((it->>'total_ht')::numeric * (it->>'tva')::numeric / 100, 3)) AS tva
+    FROM ${table} x, jsonb_array_elements(x.items) it WHERE x.company_id = $1 AND x.issue_date >= $2 AND x.issue_date < $3 ${extra} GROUP BY 1 ORDER BY 1`, [cid, from, to]);
+  const [ventes, avoirs, achats] = await Promise.all([byRate('invoices', ''), byRate('documents', "AND x.type = 'avoir'"), byRate('purchases', "AND x.type = 'facture'")]);
+  const sums = (await db.query(`SELECT
+      (SELECT COALESCE(SUM(timbre),0) FROM invoices WHERE company_id=$1 AND issue_date >= $2 AND issue_date < $3)::numeric timbre_ventes,
+      (SELECT count(*) FROM invoices WHERE company_id=$1 AND issue_date >= $2 AND issue_date < $3)::int nb_factures,
+      (SELECT COALESCE(SUM(total_ttc),0) FROM invoices WHERE company_id=$1 AND issue_date >= $2 AND issue_date < $3)::numeric ttc_ventes,
+      (SELECT COALESCE(SUM(timbre),0) FROM purchases WHERE company_id=$1 AND type='facture' AND issue_date >= $2 AND issue_date < $3)::numeric timbre_achats,
+      (SELECT COALESCE(SUM(amount),0) FROM payments WHERE company_id=$1 AND method='retenue à la source' AND paid_on >= $2 AND paid_on < $3)::numeric rs_subies,
+      (SELECT COALESCE(SUM(amount),0) FROM payments WHERE company_id=$1 AND method NOT IN ('retenue à la source','avoir') AND paid_on >= $2 AND paid_on < $3)::numeric encaisse,
+      (SELECT COALESCE(SUM(amount),0) FROM purchase_payments WHERE company_id=$1 AND paid_on >= $2 AND paid_on < $3)::numeric decaisse`, [cid, from, to])).rows[0];
+  const methods = (await db.query(`SELECT method, SUM(amount)::numeric amount FROM payments WHERE company_id=$1 AND paid_on >= $2 AND paid_on < $3 GROUP BY 1 ORDER BY 2 DESC`, [cid, from, to])).rows;
+  const journalVentes = (await db.query(`SELECT i.number, i.issue_date, i.due_date, cl.name AS client, cl.matricule_fiscal AS mf, i.total_ht, i.total_tva, i.timbre, i.total_ttc, i.items FROM invoices i JOIN clients cl ON cl.id = i.client_id
+    WHERE i.company_id=$1 AND i.issue_date >= $2 AND i.issue_date < $3 ORDER BY i.issue_date, i.number`, [cid, from, to])).rows;
+  const journalAvoirs = (await db.query(`SELECT d.number, d.issue_date, cl.name AS client, cl.matricule_fiscal AS mf, d.total_ht, d.total_tva, d.total_ttc, d.items FROM documents d JOIN clients cl ON cl.id = d.client_id
+    WHERE d.company_id=$1 AND d.type='avoir' AND d.issue_date >= $2 AND d.issue_date < $3 ORDER BY d.issue_date, d.number`, [cid, from, to])).rows;
+  const journalAchats = (await db.query(`SELECT p.number, p.supplier_ref, p.issue_date, p.due_date, s.name AS fournisseur, s.matricule_fiscal AS mf, p.total_ht, p.total_tva, p.timbre, p.total_ttc, p.items FROM purchases p JOIN suppliers s ON s.id = p.supplier_id
+    WHERE p.company_id=$1 AND p.type='facture' AND p.issue_date >= $2 AND p.issue_date < $3 ORDER BY p.issue_date, p.number`, [cid, from, to])).rows;
+  const merge = (a, b, sign) => { const m = {}; for (const r of a) m[r.rate] = { rate: r.rate, ht: r3(r.ht), tva: r3(r.tva) }; for (const r of b) { const x = m[r.rate] || (m[r.rate] = { rate: r.rate, ht: 0, tva: 0 }); x.ht = r3(x.ht + sign * r.ht); x.tva = r3(x.tva + sign * r.tva); } return Object.values(m).sort((x, y) => x.rate - y.rate); };
+  const collectee = merge(ventes.rows, avoirs.rows, -1);
+  const deductible = achats.rows.map(r => ({ rate: r.rate, ht: r3(r.ht), tva: r3(r.tva) }));
+  const tc = r3(collectee.reduce((s, r) => s + r.tva, 0)), td = r3(deductible.reduce((s, r) => s + r.tva, 0));
+  return { month, collectee, deductible, tva_collectee: tc, tva_deductible: td, tva_a_payer: r3(tc - td),
+    ca_ht: r3(collectee.reduce((s, r) => s + r.ht, 0)), achats_ht: r3(deductible.reduce((s, r) => s + r.ht, 0)), ...sums, methods,
+    journal_ventes: journalVentes, journal_avoirs: journalAvoirs, journal_achats: journalAchats };
+});
+
 // ---------- paiements ----------
 route('GET', '/api/payments', async (req) => {
   const { rows } = await db.query(`SELECT p.*, i.number, cl.name AS client_name, cl.id AS client_id, u.name AS created_by_name
@@ -937,7 +982,7 @@ route('POST', '/api/admin/companies', { superadmin: true, readOnlyOk: true }, as
   const months = Math.max(0, Math.min(24, parseInt(b.months, 10) || 0));
   return db.tx(async t => {
     const c = await t.query(`INSERT INTO companies (name, phone, email, matricule_fiscal, trial_ends, plan, paid_until, status) VALUES ($1,$2,$3,$4,$5,$6,$7,'active') RETURNING id`,
-      [companyName, str(b.phone, 40), a.email, str(b.matricule_fiscal, 40), addDays(today(), TRIAL_DAYS), PLANS[b.plan] ? b.plan : 'mensuel', months ? addMonths(today(), months) : null]);
+      [companyName, str(b.phone, 40), a.email, normMF(b.matricule_fiscal), addDays(today(), TRIAL_DAYS), PLANS[b.plan] ? b.plan : 'mensuel', months ? addMonths(today(), months) : null]);
     await t.query(`INSERT INTO users (company_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,'owner')`, [c.rows[0].id, a.name, a.email, a.hash]);
     return { id: c.rows[0].id };
   });
@@ -1040,6 +1085,7 @@ async function readBody(req) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   req.ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  req.query = Object.fromEntries(url.searchParams);
   if (url.pathname === '/healthz') return send(res, 200, { ok: true });
   if (!url.pathname.startsWith('/api/')) return serveStatic(req, res, url.pathname);
   try {

@@ -13,7 +13,7 @@ function amt(n, cur = true) {
   const ds = d.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
   return `<span class="amt">${neg ? '−' : ''}${ds}<span class="mil">,${String(m).padStart(3, '0')}</span>${cur ? '<span class="cur">DT</span>' : ''}</span>`;
 }
-const plain = n => (Math.round((Number(n) || 0) * 1000) / 1000).toFixed(3).replace('.', ',') + ' DT';
+const plain = n => { const [d, m] = (Math.round((Number(n) || 0) * 1000) / 1000).toFixed(3).split('.'); return d.replace(/\B(?=(\d{3})+(?!\d))/g, '\u202f') + ',' + m + ' DT'; };
 const MONTHS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
 function fdate(d) { if (!d) return '—'; const [y, m, j] = String(d).slice(0, 10).split('-'); return `${Number(j)} ${MONTHS[m - 1]} ${y}`; }
 function addDays(d, n) { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
@@ -230,6 +230,7 @@ async function pageDashboard() {
       <div><div class="k">En retard</div><div class="v ${d.overdue > 0 ? 'pome' : ''}">${amt(d.overdue, false)}</div><div class="n">${d.overdue_count} facture${d.overdue_count > 1 ? 's' : ''}</div></div>
     </div>
     ${d.supplier_due > 0 || d.low_stock > 0 ? `<div class="row-actions" style="margin-top:12px">${d.supplier_due > 0 ? `<a class="btn small" href="#/achats/facture">À payer aux fournisseurs : ${amt(d.supplier_due)}${d.supplier_overdue > 0 ? ' dont ' + plain(d.supplier_overdue) + ' en retard' : ''}</a>` : ''}${d.low_stock > 0 ? `<a class="btn small danger" href="#/stock">${d.low_stock} article${d.low_stock > 1 ? 's' : ''} en stock bas</a>` : ''}</div>` : ''}
+    <div class="row-actions" style="margin-top:12px"><a class="btn small" href="#/rapports">Déclaration du mois : TVA, timbre, retenues</a></div>
     <div class="dash-cols">
       <div>
         <h2>Échéances à traiter</h2>
@@ -301,7 +302,7 @@ function lineEditor(f, products, timbreOn = () => false) {
   return { readLines, recalc };
 }
 function salesTabs(active) {
-  const t = [['#/factures', 'Factures'], ['#/docs/devis', 'Devis'], ['#/docs/commande', 'Commandes'], ['#/docs/livraison', 'Livraisons'], ['#/docs/avoir', 'Avoirs'], ['#/paiements', 'Encaissements'], ['#/articles', 'Articles']];
+  const t = [['#/factures', 'Factures'], ['#/docs/devis', 'Devis'], ['#/docs/commande', 'Commandes'], ['#/docs/livraison', 'Livraisons'], ['#/docs/avoir', 'Avoirs'], ['#/paiements', 'Encaissements'], ['#/articles', 'Articles'], ['#/rapports', 'Rapports']];
   return `<nav class="tabs seg" aria-label="Ventes">${t.map(([h, l]) => `<a href="${h}" class="${h === active ? 'on' : ''}" ${h === active ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>`;
 }
 
@@ -328,7 +329,7 @@ function clientForm(c = {}) {
   return `<form id="cf" novalidate>
     <label>Nom ou raison sociale<input name="name" required value="${esc(c.name)}"></label>
     <div class="grid2">
-      <label>Matricule fiscal<input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567/A/M/000"></label>
+      <label>Matricule fiscal<input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567A/A/M/000"></label>
       <label>Personne à contacter<input name="contact_name" value="${esc(c.contact_name)}"></label>
       <label>Téléphone<input name="phone" type="tel" value="${esc(c.phone)}" placeholder="98 123 456"></label>
       <label>E-mail<input name="email" type="email" value="${esc(c.email)}"></label>
@@ -520,20 +521,41 @@ async function pageInvoice(id) {
 }
 
 function paymentModal(inv, done) {
-  modal(`<h2>Paiement · ${esc(inv.number)}</h2><p class="sub">${esc(inv.client_name)} · reste ${plain(inv.balance)}</p>
+  const r3 = n => Math.round(n * 1000) / 1000;
+  modal(`<h2>Paiement · ${esc(inv.number)}</h2><p class="sub">${esc(inv.client_name)} · TTC ${plain(inv.total_ttc)} · reste ${plain(inv.balance)}</p>
     <form id="pf" novalidate>
+      <label class="check"><input type="checkbox" name="rs_on"> Le client a appliqué une retenue à la source</label>
+      <div class="rsbox" hidden><div class="grid2">
+        <label>Taux de retenue<select name="rs_rate">${S.me.rs_rates.map(r => `<option value="${r}" ${r === 1 ? 'selected' : ''}>${String(r).replace('.', ',')} %</option>`).join('')}</select></label>
+        <label>Montant retenu (DT)<input name="rs_amount" type="number" inputmode="decimal" step="0.001" min="0"></label></div>
+        <label>N° du certificat de retenue<input name="rs_ref" placeholder="à réclamer au client"></label>
+        <p class="sub" style="margin-top:-6px">Calculée sur le montant TTC. En général 1 % pour les paiements de 1 000 DT TTC ou plus, 1,5 % pour les paiements de l'État.</p></div>
       <label>Montant reçu (DT)<input name="amount" type="number" inputmode="decimal" step="0.001" min="0" value="${inv.balance.toFixed(3)}" required></label>
       <div class="grid2">
         <label>Date<input name="paid_on" type="date" value="${S.me.today}" required></label>
-        <label>Mode<select name="method">${S.me.methods.map(m => `<option>${m}</option>`).join('')}</select></label>
+        <label>Mode<select name="method">${S.me.methods.filter(x => x !== 'retenue à la source').map(x => `<option>${x}</option>`).join('')}</select></label>
       </div>
       <label>Référence (n° de chèque, virement…)<input name="reference"></label>
       <div class="row-actions"><button class="btn primary" type="submit">Enregistrer le paiement</button><button type="button" class="btn" data-close>Annuler</button></div>
     </form>`, (m, close) => {
-    const f = m.querySelector('form');
+    const f = m.querySelector('form'), box = m.querySelector('.rsbox');
+    const calc = () => {
+      if (!f.elements.rs_on.checked) { f.elements.amount.value = inv.balance.toFixed(3); return; }
+      const rs = Math.min(inv.balance, r3(inv.total_ttc * Number(f.elements.rs_rate.value) / 100));
+      f.elements.rs_amount.value = rs.toFixed(3);
+      f.elements.amount.value = r3(inv.balance - rs).toFixed(3);
+    };
+    f.elements.rs_on.onchange = () => { box.hidden = !f.elements.rs_on.checked; calc(); };
+    f.elements.rs_rate.onchange = calc;
+    f.elements.rs_amount.oninput = () => { f.elements.amount.value = r3(inv.balance - Number(f.elements.rs_amount.value || 0)).toFixed(3); };
     f.onsubmit = e => { e.preventDefault(); guard(f.querySelector('[type=submit]'), async () => {
-      const d = formData(f); await api('POST', '/payments', { invoice_id: inv.id, amount: Number(d.amount), paid_on: d.paid_on, method: d.method, reference: d.reference });
-      close(); toast('Paiement enregistré'); done();
+      const d = formData(f);
+      const rs = d.rs_on ? Number(d.rs_amount || 0) : 0, amount = Number(d.amount || 0);
+      if (rs <= 0 && amount <= 0) throw new Error('Indiquez un montant');
+      if (r3(rs + amount) > r3(inv.balance) + 0.0005) throw new Error(`Le total dépasse le reste à payer (${plain(inv.balance)})`);
+      if (rs > 0) await api('POST', '/payments', { invoice_id: inv.id, amount: rs, paid_on: d.paid_on, method: 'retenue à la source', reference: d.rs_ref || `RS ${String(d.rs_rate).replace('.', ',')} %` });
+      if (amount > 0) await api('POST', '/payments', { invoice_id: inv.id, amount, paid_on: d.paid_on, method: d.method, reference: d.reference });
+      close(); toast(rs > 0 ? 'Paiement et retenue à la source enregistrés' : 'Paiement enregistré'); done();
     }); };
   });
 }
@@ -697,7 +719,7 @@ const P_NEW = { commande: 'Nouvelle commande fournisseur', reception: 'Nouveau b
 const P_PLURAL = { commande: 'Commandes fournisseurs', reception: 'Bons de réception', facture: 'Factures d\'achat' };
 function pTag(p) { const [l, c] = P_STATUS[p.pay_status] || [p.pay_status, 'attente']; return `<span class="tag ${c}">${l}</span>`; }
 function purchaseTabs(active) {
-  const t = [['#/achats', 'Fournisseurs'], ['#/achats/commande', 'Commandes'], ['#/achats/reception', 'Réceptions'], ['#/achats/facture', 'Factures d\'achat'], ['#/stock', 'Stock']];
+  const t = [['#/achats', 'Fournisseurs'], ['#/achats/commande', 'Commandes'], ['#/achats/reception', 'Réceptions'], ['#/achats/facture', 'Factures d\'achat'], ['#/stock', 'Stock'], ['#/rapports', 'Rapports']];
   return `<nav class="tabs seg" aria-label="Achats">${t.map(([h, l]) => `<a href="${h}" class="${h === active ? 'on' : ''}" ${h === active ? 'aria-current="page"' : ''}>${l}</a>`).join('')}</nav>`;
 }
 function purchaseList(rows, empty = 'Aucun document.') {
@@ -865,6 +887,54 @@ async function pageStock() {
   document.querySelectorAll('[data-wren]').forEach(b => b.onclick = () => whModal({ id: b.dataset.wren, name: b.dataset.n }));
   document.querySelectorAll('[data-wdel]').forEach(b => b.onclick = async () => { if (!await confirmBox('Supprimer ce dépôt ?')) return; guard(b, async () => { await api('DELETE', '/warehouses/' + b.dataset.wdel); toast('Dépôt supprimé'); pageStock(); }); });
   document.querySelectorAll('[data-mdel]').forEach(b => b.onclick = async () => { if (!await confirmBox('Annuler ce mouvement ?', 'Annuler le mouvement')) return; guard(b, async () => { await api('DELETE', '/stock/moves/' + b.dataset.mdel); toast('Mouvement annulé'); pageStock(); }); });
+}
+
+
+// ---------- rapports ----------
+function csvDownload(name, rows) {
+  const cell = v => { if (v == null) return ''; if (typeof v === 'number') return String(Math.round(v * 1000) / 1000).replace('.', ','); const t = String(v); return /[;"\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+  const blob = new Blob(['﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function rateCols(items) { const o = {}; (items || []).forEach(l => { o[l.tva] = (o[l.tva] || 0) + Math.round(l.total_ht * l.tva / 100 * 1000) / 1000; }); return o; }
+async function pageReports() {
+  loading('#/factures');
+  const month = S.repMonth || S.me.today.slice(0, 7);
+  const r = await api('GET', '/reports/monthly?month=' + month);
+  const [y, mo] = month.split('-');
+  const label = `${['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'][Number(mo) - 1]} ${y}`;
+  const rateTable = rows => rows.length ? `<div class="list">${rows.map(x => `<div class="item"><div class="main"><div class="t">TVA ${x.rate} %</div><div class="m">base HT ${plain(x.ht)}</div></div><div class="r">${amt(x.tva)}</div></div>`).join('')}</div>` : '<div class="list"><div class="empty">Rien ce mois-ci.</div></div>';
+  shell('#/factures', `${salesTabs('#/rapports')}<div class="head"><h1>Rapports</h1><input type="month" id="mon" value="${month}" aria-label="Mois" style="max-width:180px"></div>
+    <p class="sub" style="margin-top:-6px">Déclaration mensuelle de ${label}, d'après les factures, avoirs et factures d'achat saisis dans Dafter. À vérifier avec votre comptable avant dépôt.</p>
+    <div class="hero-due"><div class="k">${r.tva_a_payer >= 0 ? 'TVA à payer' : 'Crédit de TVA'}</div><div class="v">${amt(Math.abs(r.tva_a_payer))}</div><div class="sub">collectée ${plain(r.tva_collectee)} − déductible ${plain(r.tva_deductible)}</div></div>
+    <div class="ledger">
+      <div><div class="k">Chiffre d'affaires HT</div><div class="v">${amt(r.ca_ht, false)}</div><div class="n">${r.nb_factures} facture${r.nb_factures > 1 ? 's' : ''}, avoirs déduits</div></div>
+      <div><div class="k">Droit de timbre collecté</div><div class="v">${amt(r.timbre_ventes, false)}</div><div class="n">1 DT par facture</div></div>
+      <div><div class="k">Retenues à la source subies</div><div class="v">${amt(r.rs_subies, false)}</div><div class="n">à imputer sur vos impôts</div></div>
+      <div><div class="k">Achats HT</div><div class="v">${amt(r.achats_ht, false)}</div><div class="n">factures d'achat</div></div>
+    </div>
+    <h2>TVA collectée (ventes moins avoirs)</h2>${rateTable(r.collectee)}
+    <h2>TVA déductible (achats)</h2>${rateTable(r.deductible)}
+    <h2>Trésorerie du mois</h2>
+    <div class="list"><div class="item"><div class="main"><div class="t">Encaissé</div><div class="m">${r.methods.filter(x => x.method !== 'retenue à la source' && x.method !== 'avoir').map(x => esc(x.method) + ' ' + plain(x.amount)).join(' · ') || '—'}</div></div><div class="r">${amt(r.encaisse)}</div></div>
+      <div class="item"><div class="main"><div class="t">Payé aux fournisseurs</div></div><div class="r">${amt(r.decaisse)}</div></div></div>
+    <h2>Pour votre comptable</h2>
+    <div class="row-actions"><button class="btn" id="xv">Journal des ventes (Excel)</button><button class="btn" id="xa">Journal des achats (Excel)</button><button class="btn" id="xd">Récapitulatif TVA (Excel)</button></div>`);
+  document.getElementById('mon').onchange = e => { S.repMonth = e.target.value; pageReports(); };
+  const rates = [0, 7, 13, 19];
+  document.getElementById('xv').onclick = () => {
+    const head = ['Type', 'Numéro', 'Date', 'Échéance', 'Client', 'Matricule fiscal', 'Total HT', ...rates.map(x => 'TVA ' + x + ' %'), 'Total TVA', 'Timbre', 'Total TTC'];
+    const rows = r.journal_ventes.map(v => { const c = rateCols(v.items); return ['Facture', v.number, v.issue_date, v.due_date, v.client, v.mf, v.total_ht, ...rates.map(x => c[x] || 0), v.total_tva, v.timbre, v.total_ttc]; })
+      .concat(r.journal_avoirs.map(v => { const c = rateCols(v.items); return ['Avoir', v.number, v.issue_date, '', v.client, v.mf, -v.total_ht, ...rates.map(x => -(c[x] || 0)), -v.total_tva, 0, -v.total_ttc]; }));
+    csvDownload(`journal-ventes-${month}.csv`, [head, ...rows]);
+  };
+  document.getElementById('xa').onclick = () => {
+    const head = ['Numéro', 'N° fournisseur', 'Date', 'Échéance', 'Fournisseur', 'Matricule fiscal', 'Total HT', ...rates.map(x => 'TVA ' + x + ' %'), 'Total TVA', 'Timbre', 'Total TTC'];
+    csvDownload(`journal-achats-${month}.csv`, [head, ...r.journal_achats.map(v => { const c = rateCols(v.items); return [v.number, v.supplier_ref, v.issue_date, v.due_date, v.fournisseur, v.mf, v.total_ht, ...rates.map(x => c[x] || 0), v.total_tva, v.timbre, v.total_ttc]; })]);
+  };
+  document.getElementById('xd').onclick = () => csvDownload(`recap-tva-${month}.csv`, [['Rubrique', 'Taux', 'Base HT', 'TVA'],
+    ...r.collectee.map(x => ['TVA collectée', x.rate + ' %', x.ht, x.tva]), ...r.deductible.map(x => ['TVA déductible', x.rate + ' %', x.ht, x.tva]),
+    ['TVA à payer (ou crédit si négatif)', '', '', r.tva_a_payer], ['Droit de timbre collecté', '', '', r.timbre_ventes], ['Retenues à la source subies', '', '', r.rs_subies]]);
 }
 
 // ---------- paiements ----------
@@ -1114,6 +1184,7 @@ async function router() {
     if ((m = h.match(/^#\/doc\/(\d+)\/modifier$/))) return await pageDocEdit(null, m[1]);
     if ((m = h.match(/^#\/doc\/(\d+)$/))) return await pageDoc(m[1]);
     if (h === '#/articles') return await pageProducts();
+    if (h === '#/rapports') return await pageReports();
     if (h === '#/achats') return await pageSuppliers();
     if ((m = h.match(/^#\/fournisseurs\/(\d+)$/))) return await pageSupplier(m[1]);
     if ((m = h.match(/^#\/achats\/(commande|reception|facture)$/))) return await pagePurchases(m[1]);
