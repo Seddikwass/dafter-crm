@@ -319,7 +319,7 @@ async function pageClients() {
     <div id="lst"></div>`);
   const draw = q => {
     q = (q || '').toLowerCase();
-    const f = rows.filter(c => !q || [c.name, c.phone, c.city, c.email, c.contact_name].some(v => (v || '').toLowerCase().includes(q)));
+    const f = rows.filter(c => !q || [c.name, c.legal_name, c.phone, c.city, c.email, c.contact_name].some(v => (v || '').toLowerCase().includes(q)));
     document.getElementById('lst').innerHTML = !rows.length
       ? '<div class="list"><div class="empty">Aucun client pour l\'instant.<br><a class="btn primary" href="#/clients/nouveau">Ajouter un client</a></div></div>'
       : `<div class="list">${f.map(c => `<a class="item ${c.overdue > 0 ? 's-retard' : ''}" href="#/clients/${c.id}"><div class="main"><div class="t">${esc(c.name)}</div><div class="m">${esc([c.city, c.phone].filter(Boolean).join(' · ') || `${c.invoice_count} facture${c.invoice_count > 1 ? 's' : ''}`)}</div></div>
@@ -331,8 +331,9 @@ async function pageClients() {
 
 function clientForm(c = {}) {
   return `<form id="cf" novalidate>
-    <label>Nom ou raison sociale<input name="name" required value="${esc(c.name)}"></label>
     <div class="grid2">
+      <label>Nom du client (usuel)<input name="name" required value="${esc(c.name)}" placeholder="ex. Café Le Jasmin"></label>
+      <label>Raison sociale (sur les factures)<input name="legal_name" value="${esc(c.legal_name)}" placeholder="ex. Société Jasmin SARL"></label>
       <label>Matricule fiscal<input name="matricule_fiscal" value="${esc(c.matricule_fiscal)}" placeholder="1234567A/A/M/000"></label>
       <label>Personne à contacter<input name="contact_name" value="${esc(c.contact_name)}"></label>
       <label>Téléphone<input name="phone" type="tel" value="${esc(c.phone)}" placeholder="98 123 456"></label>
@@ -362,6 +363,7 @@ async function pageClient(id) {
   const tel = phoneIntl(c.phone);
   shell('#/clients', `<a class="back" href="#/clients">‹ Clients</a>
     <div class="head"><h1>${esc(c.name)}</h1><a class="btn" href="#/clients/${c.id}/modifier">Modifier</a></div>
+    ${c.legal_name && c.legal_name !== c.name ? `<p class="sub" style="margin:-8px 0 12px">${esc(c.legal_name)}</p>` : ''}
     <div class="row-actions" style="margin:-4px 0 16px">
       ${c.phone ? `<a class="btn small" href="tel:${esc(c.phone)}">Appeler</a><a class="btn small wa" target="_blank" rel="noopener" href="https://wa.me/${tel}">WhatsApp</a>` : ''}
       ${c.email ? `<a class="btn small" href="mailto:${esc(c.email)}">E-mail</a>` : ''}
@@ -378,6 +380,7 @@ async function pageClient(id) {
     <div class="list">${payments.length ? payments.map(p => `<a class="item" href="#/factures/${p.invoice_id}"><div class="main"><div class="t">${fdate(p.paid_on)} · ${esc(p.method)}</div><div class="m">${esc(p.number)}${p.reference ? ' · réf. ' + esc(p.reference) : ''}</div></div><div class="r">${amt(p.amount)}</div></a>`).join('') : '<div class="empty">Aucun paiement reçu.</div>'}</div>
     <h2>Coordonnées</h2>
     <div class="panel"><dl class="kv">
+      <dt>Raison sociale</dt><dd>${esc(c.legal_name) || '<span class="sub">non renseignée : le nom usuel est imprimé</span>'}</dd>
       <dt>Matricule fiscal</dt><dd>${esc(c.matricule_fiscal) || '—'}</dd><dt>Contact</dt><dd>${esc(c.contact_name) || '—'}</dd>
       <dt>Téléphone</dt><dd>${esc(c.phone) || '—'}</dd><dt>E-mail</dt><dd>${esc(c.email) || '—'}</dd>
       <dt>Adresse</dt><dd>${esc([c.address, c.city].filter(Boolean).join(', ')) || '—'}</dd><dt>Notes</dt><dd style="white-space:pre-wrap">${esc(c.notes) || '—'}</dd>
@@ -574,7 +577,7 @@ function printInvoice(inv, kind, opts = {}) {
       <div><h1>${esc(co.name)}</h1>${co.matricule_fiscal ? `MF : ${esc(co.matricule_fiscal)}<br>` : ''}${esc([co.address, co.city].filter(Boolean).join(', '))}<br>${esc([co.phone, co.email].filter(Boolean).join(' · '))}</div>
       <div style="text-align:right"><h1>${K.label}</h1>N° <b>${esc(inv.number)}</b><br>Date : ${fdate(inv.issue_date)}${inv.due_date ? `<br>Échéance : ${fdate(inv.due_date)}` : ''}${inv.valid_until ? `<br>${kind === 'devis' ? 'Valable jusqu\'au' : 'Livraison prévue le'} : ${fdate(inv.valid_until)}` : ''}${kind === 'avoir' && inv.invoice_number ? `<br>Sur facture : ${esc(inv.invoice_number)}` : ''}</div>
     </div>
-    <div class="inv-box" style="margin-left:auto;width:50%"><b>${esc(c.name)}</b><br>${c.matricule_fiscal ? `MF : ${esc(c.matricule_fiscal)}<br>` : ''}${[c.address, c.city].some(Boolean) ? esc([c.address, c.city].filter(Boolean).join(', ')) + '<br>' : ''}${esc(c.phone || '')}</div>
+    <div class="inv-box" style="margin-left:auto;width:50%"><b>${esc(c.legal_name || c.name)}</b><br>${c.legal_name && c.legal_name !== c.name ? esc(c.name) + '<br>' : ''}${c.matricule_fiscal ? `MF : ${esc(c.matricule_fiscal)}<br>` : ''}${[c.address, c.city].some(Boolean) ? esc([c.address, c.city].filter(Boolean).join(', ')) + '<br>' : ''}${esc(c.phone || '')}</div>
     ${qtyOnly ? `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Quantité</th></tr></thead>
     <tbody>${inv.items.map(l => `<tr><td>${esc(l.designation)}</td><td class="rt">${l.qty}</td></tr>`).join('')}</tbody></table>
     <div style="display:flex;justify-content:space-between;margin-top:50px"><span>${opts.sign1 || 'Signature du livreur'}</span><span>${opts.sign2 || 'Signature et cachet du client'}</span></div>` : `<table class="inv-table"><thead><tr><th>Désignation</th><th class="rt">Qté</th><th class="rt">P.U. HT</th><th class="rt">TVA</th><th class="rt">Total HT</th></tr></thead>
@@ -734,8 +737,8 @@ function purchaseList(rows, empty = 'Aucun document.') {
 }
 function supplierModal(sp = {}, done) {
   modal(`<h2>${sp.id ? 'Modifier le fournisseur' : 'Nouveau fournisseur'}</h2><form novalidate>
-    <label>Nom ou raison sociale<input name="name" required value="${esc(sp.name)}"></label>
-    <div class="grid2"><label>Matricule fiscal<input name="matricule_fiscal" value="${esc(sp.matricule_fiscal)}"></label><label>Contact<input name="contact_name" value="${esc(sp.contact_name)}"></label>
+    <div class="grid2"><label>Nom du fournisseur (usuel)<input name="name" required value="${esc(sp.name)}"></label>
+    <label>Raison sociale<input name="legal_name" value="${esc(sp.legal_name)}"></label><label>Matricule fiscal<input name="matricule_fiscal" value="${esc(sp.matricule_fiscal)}"></label><label>Contact<input name="contact_name" value="${esc(sp.contact_name)}"></label>
     <label>Téléphone<input name="phone" type="tel" value="${esc(sp.phone)}"></label><label>E-mail<input name="email" type="email" value="${esc(sp.email)}"></label>
     <label>Adresse<input name="address" value="${esc(sp.address)}"></label><label>Ville<input name="city" value="${esc(sp.city)}"></label></div>
     <label>Notes<textarea name="notes">${esc(sp.notes)}</textarea></label>

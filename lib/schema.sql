@@ -210,3 +210,6 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 CREATE INDEX IF NOT EXISTS reminders_invoice ON reminders(invoice_id);
 CREATE INDEX IF NOT EXISTS reminders_company ON reminders(company_id, status);
+
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS legal_name TEXT;
+ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS legal_name TEXT;

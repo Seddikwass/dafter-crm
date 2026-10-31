@@ -271,7 +271,7 @@ const INVOICE_SELECT = `
 function clientFields(b) {
   const name = str(b.name, 160); if (!name) throw bad('Nom du client obligatoire');
   const email = str(b.email, 160); if (email && !isEmail(email)) throw bad('E-mail du client invalide');
-  return [name, normMF(b.matricule_fiscal), str(b.contact_name, 120), str(b.phone, 40), email, str(b.address, 300), str(b.city, 80), str(b.notes, 2000)];
+  return [name, normMF(b.matricule_fiscal), str(b.contact_name, 120), str(b.phone, 40), email, str(b.address, 300), str(b.city, 80), str(b.notes, 2000), str(b.legal_name, 200)];
 }
 
 route('GET', '/api/clients', async (req) => {
@@ -297,12 +297,12 @@ route('POST', '/api/clients', async (req, res, b) => {
   const n = await db.query('SELECT count(*)::int n FROM clients WHERE company_id = $1', [req.user.company_id]);
   const max = PLANS[req.user.plan]?.maxClients || 100000;
   if (n.rows[0].n >= max) throw bad(`Limite de ${max} clients atteinte.`);
-  const { rows } = await db.query(`INSERT INTO clients (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+  const { rows } = await db.query(`INSERT INTO clients (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes, legal_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
     [req.user.company_id, ...clientFields(b)]);
   return rows[0];
 });
 route('PUT', '/api/clients/:id', async (req, res, b, p) => {
-  const r = await db.query(`UPDATE clients SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8 WHERE id=$9 AND company_id=$10`,
+  const r = await db.query(`UPDATE clients SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8, legal_name=$9 WHERE id=$10 AND company_id=$11`,
     [...clientFields(b), p.id, req.user.company_id]);
   if (!r.rowCount) throw new HttpError(404, 'Client introuvable');
   return { ok: true };
@@ -635,11 +635,11 @@ route('GET', '/api/suppliers/:id', async (req, res, b, p) => {
   return { supplier: s, purchases };
 });
 route('POST', '/api/suppliers', async (req, res, b) => {
-  const { rows } = await db.query(`INSERT INTO suppliers (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [req.user.company_id, ...clientFields(b)]);
+  const { rows } = await db.query(`INSERT INTO suppliers (company_id, name, matricule_fiscal, contact_name, phone, email, address, city, notes, legal_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [req.user.company_id, ...clientFields(b)]);
   return rows[0];
 });
 route('PUT', '/api/suppliers/:id', async (req, res, b, p) => {
-  const r = await db.query(`UPDATE suppliers SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8 WHERE id=$9 AND company_id=$10`, [...clientFields(b), p.id, req.user.company_id]);
+  const r = await db.query(`UPDATE suppliers SET name=$1, matricule_fiscal=$2, contact_name=$3, phone=$4, email=$5, address=$6, city=$7, notes=$8, legal_name=$9 WHERE id=$10 AND company_id=$11`, [...clientFields(b), p.id, req.user.company_id]);
   if (!r.rowCount) throw new HttpError(404, 'Fournisseur introuvable');
   return { ok: true };
 });
@@ -871,11 +871,11 @@ route('GET', '/api/reports/monthly', async (req) => {
       (SELECT COALESCE(SUM(amount),0) FROM payments WHERE company_id=$1 AND method NOT IN ('retenue à la source','avoir') AND paid_on >= $2 AND paid_on < $3)::numeric encaisse,
       (SELECT COALESCE(SUM(amount),0) FROM purchase_payments WHERE company_id=$1 AND paid_on >= $2 AND paid_on < $3)::numeric decaisse`, [cid, from, to])).rows[0];
   const methods = (await db.query(`SELECT method, SUM(amount)::numeric amount FROM payments WHERE company_id=$1 AND paid_on >= $2 AND paid_on < $3 GROUP BY 1 ORDER BY 2 DESC`, [cid, from, to])).rows;
-  const journalVentes = (await db.query(`SELECT i.number, i.issue_date, i.due_date, cl.name AS client, cl.matricule_fiscal AS mf, i.total_ht, i.total_tva, i.timbre, i.total_ttc, i.items FROM invoices i JOIN clients cl ON cl.id = i.client_id
+  const journalVentes = (await db.query(`SELECT i.number, i.issue_date, i.due_date, COALESCE(cl.legal_name, cl.name) AS client, cl.matricule_fiscal AS mf, i.total_ht, i.total_tva, i.timbre, i.total_ttc, i.items FROM invoices i JOIN clients cl ON cl.id = i.client_id
     WHERE i.company_id=$1 AND i.issue_date >= $2 AND i.issue_date < $3 ORDER BY i.issue_date, i.number`, [cid, from, to])).rows;
-  const journalAvoirs = (await db.query(`SELECT d.number, d.issue_date, cl.name AS client, cl.matricule_fiscal AS mf, d.total_ht, d.total_tva, d.total_ttc, d.items FROM documents d JOIN clients cl ON cl.id = d.client_id
+  const journalAvoirs = (await db.query(`SELECT d.number, d.issue_date, COALESCE(cl.legal_name, cl.name) AS client, cl.matricule_fiscal AS mf, d.total_ht, d.total_tva, d.total_ttc, d.items FROM documents d JOIN clients cl ON cl.id = d.client_id
     WHERE d.company_id=$1 AND d.type='avoir' AND d.issue_date >= $2 AND d.issue_date < $3 ORDER BY d.issue_date, d.number`, [cid, from, to])).rows;
-  const journalAchats = (await db.query(`SELECT p.number, p.supplier_ref, p.issue_date, p.due_date, s.name AS fournisseur, s.matricule_fiscal AS mf, p.total_ht, p.total_tva, p.timbre, p.total_ttc, p.items FROM purchases p JOIN suppliers s ON s.id = p.supplier_id
+  const journalAchats = (await db.query(`SELECT p.number, p.supplier_ref, p.issue_date, p.due_date, COALESCE(s.legal_name, s.name) AS fournisseur, s.matricule_fiscal AS mf, p.total_ht, p.total_tva, p.timbre, p.total_ttc, p.items FROM purchases p JOIN suppliers s ON s.id = p.supplier_id
     WHERE p.company_id=$1 AND p.type='facture' AND p.issue_date >= $2 AND p.issue_date < $3 ORDER BY p.issue_date, p.number`, [cid, from, to])).rows;
   const merge = (a, b, sign) => { const m = {}; for (const r of a) m[r.rate] = { rate: r.rate, ht: r3(r.ht), tva: r3(r.tva) }; for (const r of b) { const x = m[r.rate] || (m[r.rate] = { rate: r.rate, ht: 0, tva: 0 }); x.ht = r3(x.ht + sign * r.ht); x.tva = r3(x.tva + sign * r.tva); } return Object.values(m).sort((x, y) => x.rate - y.rate); };
   const collectee = merge(ventes.rows, avoirs.rows, -1);
